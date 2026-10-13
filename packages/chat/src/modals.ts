@@ -3,6 +3,15 @@
  */
 
 import type { FieldsElement, TextElement } from "./cards";
+// `TextInput` lives in its own leaf module so cards.ts can use it without
+// pulling this one in, but it stays part of this module's public surface.
+import { TextInput, type TextInputElement } from "./text-input";
+
+export {
+  TextInput,
+  type TextInputElement,
+  type TextInputOptions,
+} from "./text-input";
 
 // ============================================================================
 // Modal Element Types
@@ -43,17 +52,6 @@ export interface ModalElement {
   type: "modal";
 }
 
-export interface TextInputElement {
-  id: string;
-  initialValue?: string;
-  label: string;
-  maxLength?: number;
-  multiline?: boolean;
-  optional?: boolean;
-  placeholder?: string;
-  type: "text_input";
-}
-
 export interface DateInputElement {
   id: string;
   /** Pre-filled date as `YYYY-MM-DD`. */
@@ -78,6 +76,7 @@ export interface NumberInputElement {
 }
 
 export interface SelectElement {
+  dispatchAction?: boolean;
   id: string;
   initialOption?: string;
   label: string;
@@ -104,6 +103,7 @@ export interface SelectOptionElement {
 }
 
 export interface RadioSelectElement {
+  dispatchAction?: boolean;
   id: string;
   initialOption?: string;
   label: string;
@@ -170,29 +170,6 @@ export function Modal(options: ModalOptions): ModalElement {
   };
 }
 
-export interface TextInputOptions {
-  id: string;
-  initialValue?: string;
-  label: string;
-  maxLength?: number;
-  multiline?: boolean;
-  optional?: boolean;
-  placeholder?: string;
-}
-
-export function TextInput(options: TextInputOptions): TextInputElement {
-  return {
-    type: "text_input",
-    id: options.id,
-    label: options.label,
-    placeholder: options.placeholder,
-    initialValue: options.initialValue,
-    multiline: options.multiline,
-    optional: options.optional,
-    maxLength: options.maxLength,
-  };
-}
-
 export interface DateInputOptions {
   id: string;
   /** Pre-filled date as `YYYY-MM-DD`. */
@@ -240,6 +217,7 @@ export function NumberInput(options: NumberInputOptions): NumberInputElement {
 }
 
 export interface SelectOptions {
+  dispatchAction?: boolean;
   id: string;
   initialOption?: string;
   label: string;
@@ -254,6 +232,7 @@ export function Select(options: SelectOptions): SelectElement {
   }
   return {
     type: "select",
+    dispatchAction: options.dispatchAction,
     id: options.id,
     label: options.label,
     placeholder: options.placeholder,
@@ -299,6 +278,7 @@ export function SelectOption(options: {
 }
 
 export interface RadioSelectOptions {
+  dispatchAction?: boolean;
   id: string;
   initialOption?: string;
   label: string;
@@ -312,6 +292,7 @@ export function RadioSelect(options: RadioSelectOptions): RadioSelectElement {
   }
   return {
     type: "radio_select",
+    dispatchAction: options.dispatchAction,
     id: options.id,
     label: options.label,
     options: options.options,
@@ -431,6 +412,7 @@ export function fromReactModalElement(
 
     case "Select":
       return Select({
+        dispatchAction: props.dispatchAction as boolean | undefined,
         id: props.id as string,
         label: props.label as string,
         placeholder: props.placeholder as string | undefined,
@@ -454,6 +436,7 @@ export function fromReactModalElement(
 
     case "RadioSelect":
       return RadioSelect({
+        dispatchAction: props.dispatchAction as boolean | undefined,
         id: props.id as string,
         label: props.label as string,
         options: convertedChildren.filter(

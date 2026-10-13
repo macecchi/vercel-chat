@@ -1,5 +1,64 @@
 import type { ComponentProps } from "react";
 
+export const gmail = (props: ComponentProps<"svg">) => (
+  <svg
+    aria-hidden="true"
+    fill="none"
+    viewBox="0 0 256 204"
+    xmlns="http://www.w3.org/2000/svg"
+    {...props}
+  >
+    <g transform="matrix(1.454542, 0, 0, 1.454542, -11.636063, -37.817696)">
+      <path
+        d="M146 44h38v110c0 6.627-5.373 12-12 12h-20a6 6 0 0 1-6-6z"
+        fill="url(#gmail-right)"
+      />
+      <path
+        d="M46 44H8v110c0 6.627 5.373 12 12 12h20a6 6 0 0 0 6-6z"
+        fill="#fc413d"
+      />
+      <path
+        d="M39.226 30.456c-8.033-6.752-20.018-5.714-26.77 2.319-6.752 8.032-5.714 20.017 2.319 26.77l76.078 63.949a8 8 0 0 0 10.295 0l76.078-63.95c8.032-6.752 9.07-18.737 2.318-26.77-6.752-8.032-18.737-9.07-26.769-2.318L96 78.18z"
+        fill="url(#gmail-top)"
+      />
+    </g>
+    <defs>
+      <linearGradient
+        gradientUnits="userSpaceOnUse"
+        id="gmail-right"
+        x1="165"
+        x2="165"
+        y1="44"
+        y2="166"
+      >
+        <stop stopColor="#60d673" />
+        <stop offset=".17" stopColor="#42c868" />
+        <stop offset=".39" stopColor="#0ebc5f" />
+        <stop offset=".62" stopColor="#00a9bb" />
+        <stop offset=".86" stopColor="#3c90ff" />
+        <stop offset="1" stopColor="#3186ff" />
+      </linearGradient>
+      <linearGradient
+        gradientUnits="userSpaceOnUse"
+        id="gmail-top"
+        x1="8"
+        x2="184"
+        y1="46.13"
+        y2="46.13"
+      >
+        <stop offset=".08" stopColor="#ff63a0" />
+        <stop offset=".3" stopColor="#fc413d" />
+        <stop offset=".5" stopColor="#fc413d" />
+        <stop offset=".65" stopColor="#fc413d" />
+        <stop offset=".72" stopColor="#fc5c30" />
+        <stop offset=".86" stopColor="#feb10c" />
+        <stop offset=".91" stopColor="#fec700" />
+        <stop offset=".96" stopColor="#ffdb0f" />
+      </linearGradient>
+    </defs>
+  </svg>
+);
+
 export const web = (props: ComponentProps<"svg">) => (
   <svg
     fill="none"
@@ -520,6 +579,17 @@ export const twilio = (props: ComponentProps<"svg">) => (
     {...props}
   >
     <path d="M15 0C6.7 0 0 6.7 0 15s6.7 15 15 15 15-6.7 15-15S23.3 0 15 0zm0 26C8.9 26 4 21.1 4 15S8.9 4 15 4s11 4.9 11 11-4.9 11-11 11zm6.8-14.7c0 1.7-1.4 3.1-3.1 3.1s-3.1-1.4-3.1-3.1 1.4-3.1 3.1-3.1 3.1 1.4 3.1 3.1zm0 7.4c0 1.7-1.4 3.1-3.1 3.1s-3.1-1.4-3.1-3.1c0-1.7 1.4-3.1 3.1-3.1s3.1 1.4 3.1 3.1zm-7.4 0c0 1.7-1.4 3.1-3.1 3.1s-3.1-1.4-3.1-3.1c0-1.7 1.4-3.1 3.1-3.1s3.1 1.4 3.1 3.1zm0-7.4c0 1.7-1.4 3.1-3.1 3.1S8.2 13 8.2 11.3s1.4-3.1 3.1-3.1 3.1 1.4 3.1 3.1z" />
+  </svg>
+);
+
+export const twitch = (props: ComponentProps<"svg">) => (
+  <svg
+    fill="#9146FF"
+    viewBox="0 0 24 24"
+    xmlns="http://www.w3.org/2000/svg"
+    {...props}
+  >
+    <path d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714h13.714Z" />
   </svg>
 );
 

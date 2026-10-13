@@ -15,7 +15,7 @@ import { HistoryApiImpl } from "./history";
 import { isJSX, toModalElement } from "./jsx-runtime";
 import { Message, type SerializedMessage, setMessageAdapter } from "./message";
 import type { ModalElement } from "./modals";
-import { reviver as standaloneReviver } from "./reviver";
+import { createReviver } from "./reviver";
 import { type SerializedThread, ThreadImpl } from "./thread";
 import { ThreadHistoryCache } from "./thread-history";
 import type {
@@ -497,17 +497,27 @@ export class Chat<
       return;
     }
 
-    // Avoid concurrent initialization
+    // Avoid concurrent initialization. A failed state connection is forgotten so the
+    // next caller retries once the dependency (e.g. Redis) has recovered,
+    // instead of every later webhook rejecting with the first error (#922).
     if (!this.initPromise) {
-      this.initPromise = this.doInitialize();
+      this.logger.info("Initializing chat instance...");
+      const attempt = this._stateAdapter
+        .connect()
+        .catch((error: unknown) => {
+          if (this.initPromise === attempt) {
+            this.initPromise = null;
+          }
+          throw error;
+        })
+        .then(() => this.doInitialize());
+      this.initPromise = attempt;
     }
 
     await this.initPromise;
   }
 
   private async doInitialize(): Promise<void> {
-    this.logger.info("Initializing chat instance...");
-    await this._stateAdapter.connect();
     this.logger.debug("State connected");
 
     const initPromises = Array.from(this.adapters.values()).map(
@@ -1033,7 +1043,7 @@ export class Chat<
   reviver(): (key: string, value: unknown) => unknown {
     // Ensure this chat instance is registered as singleton for thread deserialization
     this.registerSingleton();
-    return standaloneReviver;
+    return createReviver(this);
   }
 
   // ChatInstance interface implementations
@@ -1745,7 +1755,11 @@ export class Chat<
     // Reconstruct thread with adapter directly (if present)
     let relatedThread: Thread | undefined;
     if (stored.thread) {
-      relatedThread = ThreadImpl.fromJSON(stored.thread, adapter) as Thread;
+      relatedThread = ThreadImpl.fromJSON(
+        stored.thread,
+        adapter,
+        this
+      ) as Thread;
     }
 
     // Reconstruct message if present
@@ -1760,7 +1774,11 @@ export class Chat<
     // Reconstruct channel if present
     let relatedChannel: Channel | undefined;
     if (stored.channel) {
-      relatedChannel = ChannelImpl.fromJSON(stored.channel, adapter) as Channel;
+      relatedChannel = ChannelImpl.fromJSON(
+        stored.channel,
+        adapter,
+        this
+      ) as Channel;
     }
 
     return {
@@ -1821,6 +1839,9 @@ export class Chat<
           type: "action",
           actionId: resolved.actionId,
           value: resolved.originalValue,
+          // Card inputs travel with the click, the same way modal submits
+          // forward their values. Absent when the card has none.
+          values: event.values,
           user: { id: event.user.userId, name: event.user.userName },
           threadId: event.threadId,
           messageId: event.messageId,
@@ -2058,6 +2079,30 @@ export class Chat<
 
   getState(): StateAdapter {
     return this._stateAdapter;
+  }
+
+  /**
+   * Streaming defaults applied to restored threads.
+   * @internal Used by ThreadImpl via the ChatSingleton interface.
+   */
+  getStreamingOptions() {
+    return {
+      updateIntervalMs: this._streamingUpdateIntervalMs,
+      fallbackStreamingPlaceholderText: this._fallbackStreamingPlaceholderText,
+    };
+  }
+
+  /**
+   * Whether this exact adapter instance is registered with this Chat.
+   * @internal Used by ThreadImpl and ChannelImpl to verify restored ownership.
+   */
+  ownsAdapter(adapter: Adapter): boolean {
+    for (const registered of this.adapters.values()) {
+      if (registered === adapter) {
+        return true;
+      }
+    }
+    return false;
   }
 
   getUserName(): string {
@@ -3192,7 +3237,9 @@ export class Chat<
       return;
     }
 
-    // Backward compat: treat DMs as mentions when no DM handlers registered
+    // Backward compat: treat DMs as mentions when no DM handlers registered.
+    // This is a routing rule, not a detection result, so it deliberately
+    // overrides an adapter's `false`: every DM is addressed to the bot.
     if (isDM) {
       message.isMention = true;
     }
@@ -3259,13 +3306,17 @@ export class Chat<
     message: Message,
     context?: MessageContext
   ): boolean {
+    // An adapter that reads the platform's own mention metadata reports a
+    // definitive boolean. Fall back to text detection only when it reports
+    // nothing, so a known non-mention is not re-derived from flattened text
+    // (where code samples and quoted text can look like a mention).
     message.isMention =
-      message.isMention || this.detectMention(adapter, message);
+      message.isMention ?? this.detectMention(adapter, message);
 
     let hasMention = message.isMention === true;
     for (const skipped of context?.skipped ?? []) {
       skipped.isMention =
-        skipped.isMention || this.detectMention(adapter, skipped);
+        skipped.isMention ?? this.detectMention(adapter, skipped);
       hasMention = hasMention || skipped.isMention === true;
     }
 

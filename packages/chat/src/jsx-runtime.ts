@@ -61,6 +61,7 @@ import {
   type SectionElement,
   Table,
   type TableElement,
+  type TableOptions,
   Text,
   type TextElement,
   type TextStyle,
@@ -129,6 +130,8 @@ export interface ButtonProps {
   /** Hover text for the button. Rendered by Teams only; other adapters ignore it */
   tooltip?: string;
   value?: string;
+  /** User IDs that can see the button. Rendered by Slack only; other adapters show the button to everyone. Hides the button but does not restrict who can trigger its action */
+  visibleTo?: string[];
 }
 
 /** Props for LinkButton component in JSX */
@@ -140,6 +143,8 @@ export interface LinkButtonProps {
   /** Hover text for the button. Rendered by Teams only; other adapters ignore it */
   tooltip?: string;
   url: string;
+  /** User IDs that can see the button. Rendered by Slack only; other adapters show the button to everyone. Hides the button but does not restrict who can trigger its action */
+  visibleTo?: string[];
 }
 
 /** Props for CardLink component in JSX */
@@ -216,6 +221,7 @@ export interface NumberInputProps {
 /** Props for Select component in JSX */
 export interface SelectProps {
   children?: unknown;
+  dispatchAction?: boolean;
   id: string;
   initialOption?: string;
   label: string;
@@ -240,13 +246,8 @@ export interface SelectOptionProps {
   value: string;
 }
 
-/** Props for Table component in JSX */
-export interface TableProps {
-  caption?: string;
-  headers: string[];
-  pageSize?: number;
-  rows: string[][];
-}
+/** Props for Table component in JSX (a Table has no children, so its props are its options) */
+export type TableProps = TableOptions;
 
 /** Props for Chart component in JSX */
 export interface ChartProps {
@@ -446,12 +447,7 @@ export interface RadioSelectComponent {
 }
 
 export interface TableComponent {
-  (options: {
-    caption?: string;
-    headers: string[];
-    pageSize?: number;
-    rows: string[][];
-  }): TableElement;
+  (options: TableOptions): TableElement;
   (props: TableProps): ChatElement;
 }
 
@@ -721,6 +717,7 @@ function resolveJSXElement(element: JSXElement): AnyCardElement {
       callbackUrl: props.callbackUrl,
       disabled: props.disabled,
       tooltip: props.tooltip,
+      visibleTo: props.visibleTo,
     });
   }
 
@@ -740,6 +737,7 @@ function resolveJSXElement(element: JSXElement): AnyCardElement {
       label,
       style: props.style,
       tooltip: props.tooltip,
+      visibleTo: props.visibleTo,
     });
   }
 
@@ -849,6 +847,7 @@ function resolveJSXElement(element: JSXElement): AnyCardElement {
       throw new Error("Select requires 'id' and 'label' props");
     }
     return Select({
+      dispatchAction: props.dispatchAction,
       id: props.id,
       label: props.label,
       placeholder: props.placeholder,
@@ -877,6 +876,7 @@ function resolveJSXElement(element: JSXElement): AnyCardElement {
       throw new Error("RadioSelect requires 'id' and 'label' props");
     }
     return RadioSelect({
+      dispatchAction: props.dispatchAction,
       id: props.id,
       label: props.label,
       initialOption: props.initialOption,
@@ -897,13 +897,9 @@ function resolveJSXElement(element: JSXElement): AnyCardElement {
   }
 
   if (type === Table) {
-    const tableProps = props as TableProps;
-    return Table({
-      headers: tableProps.headers,
-      rows: tableProps.rows,
-      caption: tableProps.caption,
-      pageSize: tableProps.pageSize,
-    });
+    // Table() copies each option by name, so a new option is added there once
+    // and reaches JSX without a second list here.
+    return Table(props as TableProps);
   }
 
   if (type === Chart) {

@@ -2062,11 +2062,11 @@ export class LinearAdapter
   ): Promise<FetchResult<LinearRawMessage>> {
     const linear = this.getClient();
     const agentSession = await linear.agentSession(thread.agentSessionId);
-    const issueId = agentSession.issueId ?? thread.issueId;
-    if (!issueId) {
-      throw new AdapterError(
-        `Linear agent session ${thread.agentSessionId} is missing issueId`,
-        "linear"
+    const issueId = agentSession.issueId;
+    if (!issueId || issueId !== thread.issueId) {
+      throw new ValidationError(
+        "linear",
+        "Agent session does not belong to this issue"
       );
     }
 
@@ -2208,32 +2208,37 @@ export class LinearAdapter
   ): Promise<FetchResult<LinearRawMessage>> {
     const linear = this.getClient();
 
-    const [rootComment, childrenConnection] = await Promise.all([
-      linear.comment({ id: commentId }),
-      // Get the children (replies) of the root comment
-      linear.comments({
-        filter: {
-          parent: { id: { eq: commentId } },
-        },
-        ...(options?.direction === "forward"
-          ? {
-              first: options?.limit ?? 50,
-            }
-          : {
-              last: options?.limit ?? 50,
-            }),
-      }),
-    ]);
+    const rootComment = await linear.comment({ id: commentId });
+    if (!rootComment.issueId || rootComment.issueId !== issueId) {
+      throw new ValidationError(
+        "linear",
+        "Comment does not belong to this issue"
+      );
+    }
+
+    // Get the children (replies) of the root comment
+    const childrenConnection = await linear.comments({
+      filter: {
+        parent: { id: { eq: commentId } },
+      },
+      ...(options?.direction === "forward"
+        ? {
+            first: options?.limit ?? 50,
+          }
+        : {
+            last: options?.limit ?? 50,
+          }),
+    });
 
     // Include the root comment as the first message, then its children
     const rootMessages = await this.commentsToMessages(
       [rootComment],
-      issueId,
+      rootComment.issueId,
       undefined
     );
     const childMessages = await this.commentsToMessages(
       childrenConnection.nodes,
-      issueId,
+      rootComment.issueId,
       undefined
     );
 
@@ -2384,7 +2389,9 @@ export class LinearAdapter
 
     return new Message<LinearRawMessage>({
       id: raw.comment.id,
-      isMention: raw.kind === "agent_session_comment", // Agent session comments are treated as mentions as they directly target the bot
+      // Agent session comments directly target the bot. Ordinary comments are
+      // left undetermined so the SDK can still detect an @mention in the body.
+      isMention: raw.kind === "agent_session_comment" ? true : undefined,
       threadId:
         raw.kind === "agent_session_comment"
           ? this.encodeThreadId({

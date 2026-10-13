@@ -323,3 +323,147 @@ describe("Teams card primitives", () => {
     expect(parseTeamsInputResponse({})).toBeNull();
   });
 });
+
+describe("Teams card primitives tables", () => {
+  const cell = (text: string, options: Record<string, unknown> = {}) => ({
+    items: [{ text, type: "TextBlock", wrap: true, ...options }],
+    type: "TableCell",
+  });
+
+  it("renders tables as the Adaptive Card Table element", () => {
+    const card = cardToAdaptiveCard({
+      children: [
+        {
+          align: ["left", "right"],
+          gridStyle: "emphasis",
+          headers: ["Name", "Score"],
+          rows: [["Ada :white_check_mark:", "10"], ["Bob"]],
+          type: "table",
+          verticalAlign: "top",
+          widths: [3, 1],
+        },
+      ],
+      type: "card",
+    });
+
+    expect(card.body[0]).toEqual({
+      columns: [
+        { horizontalCellContentAlignment: "Left", width: 3 },
+        { horizontalCellContentAlignment: "Right", width: 1 },
+      ],
+      firstRowAsHeaders: true,
+      gridStyle: "emphasis",
+      rows: [
+        {
+          cells: [
+            cell("Name", { weight: "Bolder" }),
+            cell("Score", { weight: "Bolder" }),
+          ],
+          type: "TableRow",
+        },
+        { cells: [cell("Ada ✅"), cell("10")], type: "TableRow" },
+        { cells: [cell("Bob"), cell("")], type: "TableRow" },
+      ],
+      showGridLines: true,
+      type: "Table",
+      verticalCellContentAlignment: "Top",
+    });
+  });
+
+  it("omits the header row of a headerless table and honours gridLines", () => {
+    const card = cardToAdaptiveCard({
+      children: [
+        { gridLines: false, headers: [], rows: [["a", "b"]], type: "table" },
+      ],
+      type: "card",
+    });
+
+    expect(card.body[0]).toMatchObject({
+      columns: [{ width: 1 }, { width: 1 }],
+      firstRowAsHeaders: false,
+      rows: [{ cells: [cell("a"), cell("b")], type: "TableRow" }],
+      showGridLines: false,
+      type: "Table",
+    });
+  });
+
+  it("emits no element for a table with no columns", () => {
+    const card = cardToAdaptiveCard({
+      children: [{ headers: [], rows: [[]], type: "table" }],
+      type: "card",
+    });
+
+    expect(card.body).toEqual([]);
+  });
+
+  it("falls back to weight 1 for a width that is not a positive integer", () => {
+    const card = cardToAdaptiveCard({
+      children: [
+        {
+          headers: ["A", "B", "C", "D"],
+          rows: [],
+          type: "table",
+          widths: [0, -1, 1.5, 2],
+        },
+      ],
+      type: "card",
+    });
+
+    expect(card.body[0]).toMatchObject({
+      columns: [{ width: 1 }, { width: 1 }, { width: 1 }, { width: 2 }],
+    });
+  });
+  it("renders a text input as a required single-line Input.Text by default", () => {
+    const card = cardToAdaptiveCard({
+      children: [{ id: "notes", label: "Notes", type: "text_input" }],
+      type: "card",
+    });
+
+    expect(card.body[0]).toEqual({
+      id: "notes",
+      isMultiline: false,
+      isRequired: true,
+      label: "Notes",
+      type: "Input.Text",
+    });
+  });
+
+  it("carries multiline, placeholder, maxLength and the initial value", () => {
+    const card = cardToAdaptiveCard({
+      children: [
+        {
+          id: "notes",
+          initialValue: "draft",
+          label: "Notes",
+          maxLength: 500,
+          multiline: true,
+          optional: true,
+          placeholder: "Type...",
+          type: "text_input",
+        },
+      ],
+      type: "card",
+    });
+
+    expect(card.body[0]).toEqual({
+      id: "notes",
+      isMultiline: true,
+      isRequired: false,
+      label: "Notes",
+      maxLength: 500,
+      placeholder: "Type...",
+      type: "Input.Text",
+      value: "draft",
+    });
+  });
+
+  it("falls back to the text input label", () => {
+    expect(
+      cardToTeamsFallbackText({
+        children: [{ id: "notes", label: "Notes", type: "text_input" }],
+        title: "Feedback",
+        type: "card",
+      })
+    ).toBe("Feedback\n\nNotes");
+  });
+});

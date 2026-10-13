@@ -933,6 +933,45 @@ describe("Chat", () => {
       const [, receivedMessage] = handler.mock.calls[0];
       expect(receivedMessage.isMention).toBe(true);
     });
+
+    it("should keep a definitive non-mention reported by the adapter", async () => {
+      const mentionHandler = vi.fn().mockResolvedValue(undefined);
+      const messageHandler = vi.fn().mockResolvedValue(undefined);
+      chat.onNewMention(mentionHandler);
+      chat.onNewMessage(ANY_REGEX, messageHandler);
+
+      // The adapter inspected structured content and found no mention, even
+      // though the flattened text contains @username (e.g. a code sample).
+      await chat.handleIncomingMessage(
+        mockAdapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-1", "docs mention `@slack-bot` in a snippet", {
+          isMention: false,
+        })
+      );
+
+      expect(mentionHandler).not.toHaveBeenCalled();
+      expect(messageHandler).toHaveBeenCalled();
+      const [, receivedMessage] = messageHandler.mock.calls[0];
+      expect(receivedMessage.isMention).toBe(false);
+    });
+
+    it("should keep a definitive mention reported by the adapter", async () => {
+      const mentionHandler = vi.fn().mockResolvedValue(undefined);
+      chat.onNewMention(mentionHandler);
+
+      await chat.handleIncomingMessage(
+        mockAdapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-1", "no resolvable mention text here", {
+          isMention: true,
+        })
+      );
+
+      expect(mentionHandler).toHaveBeenCalled();
+      const [, receivedMessage] = mentionHandler.mock.calls[0];
+      expect(receivedMessage.isMention).toBe(true);
+    });
   });
 
   describe("onNewMention behavior in subscribed threads", () => {
@@ -1466,6 +1505,33 @@ describe("Chat", () => {
       expect(receivedEvent.thread).toBeDefined();
     });
 
+    it("should hand the card's input values to the handler", async () => {
+      const handler = vi.fn().mockResolvedValue(undefined);
+      chat.onAction("approve", handler);
+
+      const event: Omit<ActionEvent, "thread" | "openModal"> = {
+        actionId: "approve",
+        value: "order-123",
+        values: { notes: "ship it" },
+        user: {
+          userId: "U123",
+          userName: "user",
+          fullName: "Test User",
+          isBot: false,
+          isMe: false,
+        },
+        messageId: "msg-1",
+        threadId: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        raw: {},
+      };
+
+      await chat.processAction(event, undefined);
+
+      const receivedEvent = handler.mock.calls[0][0] as ActionEvent;
+      expect(receivedEvent.values).toEqual({ notes: "ship it" });
+    });
+
     it("should allow streaming from an action without message context", async () => {
       chat.onAction(async (event) => {
         await event.thread?.post(chunks());
@@ -1957,6 +2023,86 @@ describe("Chat", () => {
           value: "order-789",
           threadId: "slack:C123:1234.5678",
         });
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("should forward the card's input values to the callbackUrl", async () => {
+      const mockFetch = vi.fn().mockResolvedValue(new Response("ok"));
+      vi.stubGlobal("fetch", mockFetch);
+
+      try {
+        (mockState as MockStateAdapter).cache.set("chat:callback:tokvals", {
+          actionId: "approve",
+          url: "https://example.com/webhook/hook3",
+          originalValue: "order-789",
+          scope: { id: "slack:C123", type: "channel" },
+        });
+
+        const event: Omit<ActionEvent, "thread" | "openModal"> = {
+          actionId: "approve",
+          value: "__cb:tokvals",
+          // A card carrying a TextInput reports what was typed here, and a
+          // callbackUrl flow has no handler to read it any other way.
+          values: { notes: "ship it" },
+          user: {
+            userId: "U123",
+            userName: "user",
+            fullName: "Test User",
+            isBot: false,
+            isMe: false,
+          },
+          messageId: "msg-1",
+          threadId: "slack:C123:1234.5678",
+          adapter: mockAdapter,
+          raw: {},
+        };
+
+        await chat.processAction(event, undefined);
+
+        const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
+        expect(body).toMatchObject({
+          type: "action",
+          actionId: "approve",
+          values: { notes: "ship it" },
+        });
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("should omit values from the callbackUrl body when the card has none", async () => {
+      const mockFetch = vi.fn().mockResolvedValue(new Response("ok"));
+      vi.stubGlobal("fetch", mockFetch);
+
+      try {
+        (mockState as MockStateAdapter).cache.set("chat:callback:tokplain", {
+          actionId: "approve",
+          url: "https://example.com/webhook/hook4",
+          scope: { id: "slack:C123", type: "channel" },
+        });
+
+        const event: Omit<ActionEvent, "thread" | "openModal"> = {
+          actionId: "approve",
+          value: "__cb:tokplain",
+          user: {
+            userId: "U123",
+            userName: "user",
+            fullName: "Test User",
+            isBot: false,
+            isMe: false,
+          },
+          messageId: "msg-1",
+          threadId: "slack:C123:1234.5678",
+          adapter: mockAdapter,
+          raw: {},
+        };
+
+        await chat.processAction(event, undefined);
+
+        const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
+        expect(body).not.toHaveProperty("values");
       } finally {
         vi.unstubAllGlobals();
       }
@@ -4069,6 +4215,68 @@ describe("Chat", () => {
       ).toEqual([{ text: "Hey @slack-bot", isMention: true }]);
     });
 
+    it("should keep a definitive non-mention on skipped queued messages", async () => {
+      const state = createMockState();
+      const adapter = createMockAdapter("slack");
+
+      const queueChat = new Chat({
+        userName: "testbot",
+        adapters: { slack: adapter },
+        state,
+        logger: mockLogger,
+        concurrency: "queue",
+      });
+
+      await queueChat.webhooks.slack(
+        new Request("http://test.com", { method: "POST" })
+      );
+
+      const mentionHandler = vi.fn().mockResolvedValue(undefined);
+      const messageHandler = vi.fn().mockResolvedValue(undefined);
+      queueChat.onNewMention(mentionHandler);
+      queueChat.onNewMessage(ANY_REGEX, messageHandler);
+
+      await state.acquireLock("slack:C123:1234.5678", 30000);
+
+      // The adapter inspected structured content and reported no mention, so
+      // the text-looking mention must not be promoted while draining the queue.
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-q-skip-coded-1", "docs mention `@slack-bot`", {
+          isMention: false,
+        })
+      );
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-q-skip-coded-2", "please review this")
+      );
+
+      await state.forceReleaseLock("slack:C123:1234.5678");
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-q-skip-coded-3", "trigger")
+      );
+
+      expect(mentionHandler).not.toHaveBeenCalled();
+
+      // The earlier queued message must reach the batch as a skipped message
+      // and stay a non-mention there.
+      const batched = messageHandler.mock.calls.find(
+        (call) => (call[2]?.skipped?.length ?? 0) > 0
+      );
+      expect(batched).toBeDefined();
+      expect(batched?.[1].isMention).toBe(false);
+      expect(
+        batched?.[2]?.skipped.map((skipped) => ({
+          text: skipped.text,
+          isMention: skipped.isMention,
+        }))
+      ).toEqual([{ text: "docs mention `@slack-bot`", isMention: false }]);
+    });
+
     it("should continue to message patterns when skipped queued mention has no handler", async () => {
       const state = createMockState();
       const adapter = createMockAdapter("slack");
@@ -5969,5 +6177,224 @@ describe("Chat", () => {
       expect(stored).toBeDefined();
       expect((stored as Array<{ id: string }>)[0].id).toBe("msg-1");
     });
+  });
+});
+
+describe("Chat initialization retry (#922)", () => {
+  it("does not restart an initialized adapter when another adapter fails", async () => {
+    const ready = createMockAdapter("ready");
+    const failing = createMockAdapter("failing");
+    const state = createMockState();
+    const failed = new Error("Adapter unavailable");
+    let active = 0;
+    ready.initialize = vi.fn(async () => {
+      active++;
+    });
+    ready.disconnect = vi.fn(async () => {
+      active--;
+    });
+    failing.initialize = vi
+      .fn()
+      .mockRejectedValueOnce(failed)
+      .mockResolvedValue(undefined);
+    const chat = new Chat({
+      userName: "testbot",
+      adapters: { ready, failing },
+      state,
+      logger: mockLogger,
+    });
+
+    try {
+      await expect(chat.initialize()).rejects.toBe(failed);
+      const results = await Promise.allSettled([
+        chat.initialize(),
+        chat.webhooks.ready(new Request("https://example.com")),
+      ]);
+
+      expect(ready.initialize).toHaveBeenCalledOnce();
+      expect(failing.initialize).toHaveBeenCalledOnce();
+      expect(state.connect).toHaveBeenCalledOnce();
+      expect(ready.handleWebhook).not.toHaveBeenCalled();
+      expect(results).toEqual([
+        { status: "rejected", reason: failed },
+        { status: "rejected", reason: failed },
+      ]);
+    } finally {
+      await chat.shutdown();
+    }
+    expect(active).toBe(0);
+    await chat.initialize();
+    expect(ready.initialize).toHaveBeenCalledTimes(2);
+    await chat.shutdown();
+    expect(active).toBe(0);
+  });
+
+  it("does not overlap adapter initialization after a sibling fails", async () => {
+    const slow = createMockAdapter("slow");
+    const failing = createMockAdapter("failing");
+    const state = createMockState();
+    const failed = new Error("Adapter unavailable");
+    let release = () => {};
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    slow.initialize = vi.fn(() => pending);
+    failing.initialize = vi
+      .fn()
+      .mockRejectedValueOnce(failed)
+      .mockResolvedValue(undefined);
+    const chat = new Chat({
+      userName: "testbot",
+      adapters: { slow, failing },
+      state,
+      logger: mockLogger,
+    });
+
+    await expect(chat.initialize()).rejects.toBe(failed);
+    const retry = Promise.allSettled([chat.initialize()]);
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(slow.initialize).toHaveBeenCalledOnce();
+      expect(failing.initialize).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      await retry;
+      await chat.shutdown();
+    }
+    expect(await retry).toEqual([{ status: "rejected", reason: failed }]);
+  });
+
+  it("recovers through a webhook after repeated state connection failures", async () => {
+    const adapter = createMockAdapter("slack");
+    const state = createMockState();
+    const failed = new Error("State unavailable");
+    state.connect = vi
+      .fn()
+      .mockRejectedValueOnce(failed)
+      .mockRejectedValueOnce(failed)
+      .mockResolvedValue(undefined);
+    const chat = new Chat({
+      userName: "testbot",
+      adapters: { slack: adapter },
+      state,
+      logger: mockLogger,
+    });
+
+    await expect(chat.initialize()).rejects.toBe(failed);
+    await expect(
+      chat.webhooks.slack(new Request("https://example.com"))
+    ).rejects.toBe(failed);
+    expect(adapter.initialize).not.toHaveBeenCalled();
+    expect(adapter.handleWebhook).not.toHaveBeenCalled();
+
+    const response = await chat.webhooks.slack(
+      new Request("https://example.com")
+    );
+    expect(response.status).toBe(200);
+    await chat.initialize();
+    expect(state.connect).toHaveBeenCalledTimes(3);
+    expect(adapter.initialize).toHaveBeenCalledOnce();
+    expect(adapter.handleWebhook).toHaveBeenCalledOnce();
+    await chat.shutdown();
+  });
+
+  it("keeps a newer attempt when a pre-shutdown state connection rejects", async () => {
+    const state = createMockState();
+    let reject = (_error: Error) => {};
+    let resolve = () => {};
+    const previous = new Promise<void>((_resolve, rejectConnection) => {
+      reject = rejectConnection;
+    });
+    const current = new Promise<void>((resolveConnection) => {
+      resolve = resolveConnection;
+    });
+    state.connect = vi
+      .fn()
+      .mockReturnValueOnce(previous)
+      .mockReturnValue(current);
+    const chat = new Chat({
+      userName: "testbot",
+      adapters: {},
+      state,
+      logger: mockLogger,
+    });
+    const failed = new Error("Old connection failed");
+    const first = expect(chat.initialize()).rejects.toBe(failed);
+    await chat.shutdown();
+    const second = chat.initialize();
+    reject(failed);
+    await first;
+    const third = chat.initialize();
+    expect(state.connect).toHaveBeenCalledTimes(2);
+    resolve();
+    await Promise.all([second, third]);
+    await chat.shutdown();
+  });
+
+  it("retries initialization after a failed attempt once the state recovers", async () => {
+    const mockAdapter = createMockAdapter("slack");
+    const mockState = createMockState();
+    const refused = Object.assign(new Error("connect ECONNREFUSED"), {
+      code: "ECONNREFUSED",
+    });
+    mockState.connect = vi
+      .fn()
+      .mockRejectedValueOnce(refused)
+      .mockResolvedValue(undefined);
+
+    const chat = new Chat({
+      userName: "testbot",
+      adapters: { slack: mockAdapter },
+      state: mockState,
+      logger: mockLogger,
+    });
+
+    await expect(chat.initialize()).rejects.toBe(refused);
+    // The adapters were never reached by the failed attempt.
+    expect(mockAdapter.initialize).not.toHaveBeenCalled();
+
+    // Redis is back: the next call must try again instead of replaying the
+    // rejected promise.
+    await expect(chat.initialize()).resolves.toBeUndefined();
+    expect(mockState.connect).toHaveBeenCalledTimes(2);
+    expect(mockAdapter.initialize).toHaveBeenCalledTimes(1);
+
+    // Once initialized, further calls are no-ops.
+    await chat.initialize();
+    expect(mockState.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("still shares one attempt between concurrent callers, including a failing one", async () => {
+    const mockAdapter = createMockAdapter("slack");
+    const mockState = createMockState();
+    let rejectConnect: (error: Error) => void = () => {};
+    mockState.connect = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((_, reject) => {
+            rejectConnect = reject;
+          })
+      )
+      .mockResolvedValue(undefined);
+
+    const chat = new Chat({
+      userName: "testbot",
+      adapters: { slack: mockAdapter },
+      state: mockState,
+      logger: mockLogger,
+    });
+
+    const first = chat.initialize();
+    const second = chat.initialize();
+    expect(mockState.connect).toHaveBeenCalledTimes(1);
+
+    const refused = new Error("connect ECONNREFUSED");
+    rejectConnect(refused);
+    await expect(first).rejects.toBe(refused);
+    await expect(second).rejects.toBe(refused);
+
+    await expect(chat.initialize()).resolves.toBeUndefined();
+    expect(mockState.connect).toHaveBeenCalledTimes(2);
   });
 });

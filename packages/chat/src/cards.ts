@@ -46,6 +46,13 @@
 
 import { chartElementToFallbackText, tableElementToAscii } from "./markdown";
 import type { RadioSelectElement, SelectElement } from "./modals";
+// A leaf module, so taking the builder as a value keeps modals.ts out of this
+// chunk — chat/workflow shares it and uses none of the modal builders.
+import {
+  TextInput,
+  type TextInputElement,
+  type TextInputOptions,
+} from "./text-input";
 
 // ============================================================================
 // Card Element Types
@@ -79,6 +86,8 @@ export interface ButtonElement {
   type: "button";
   /** Optional payload value sent with action callback */
   value?: string;
+  /** User IDs that can see the button. Rendered by Slack only; other adapters show the button to everyone. Hides the button but does not restrict who can trigger its action */
+  visibleTo?: string[];
 }
 
 /** Link button element that opens a URL */
@@ -94,6 +103,8 @@ export interface LinkButtonElement {
   type: "link-button";
   /** URL to open when clicked */
   url: string;
+  /** User IDs that can see the button. Rendered by Slack only; other adapters show the button to everyone. Hides the button but does not restrict who can trigger its action */
+  visibleTo?: string[];
 }
 
 /** Text content element */
@@ -166,18 +177,26 @@ export interface FieldsElement {
 /** Column alignment for table elements */
 export type TableAlignment = "left" | "center" | "right";
 
-/** Table element for structured data display */
-export interface TableElement {
-  /** Column alignment */
-  align?: TableAlignment[];
-  /** Accessible table caption (used by platforms with native table support) */
-  caption?: string;
-  /** Column header labels */
-  headers: string[];
-  /** Rows per page on platforms that paginate tables (Slack: 1-100, default 5) */
-  pageSize?: number;
-  /** Data rows (each row is an array of cell strings) */
-  rows: string[][];
+/** Vertical alignment of table cell content */
+export type TableVerticalAlignment = "top" | "center" | "bottom";
+
+/** Style of the grid lines drawn between table cells */
+export type TableGridStyle =
+  | "default"
+  | "emphasis"
+  | "accent"
+  | "good"
+  | "attention"
+  | "warning";
+
+/**
+ * Table element for structured data display.
+ *
+ * Carries exactly the `TableOptions` fields — a table has no children, so the
+ * builder's options and the element differ only by the discriminant. Declared
+ * by extension so a new option is documented once.
+ */
+export interface TableElement extends TableOptions {
   type: "table";
 }
 
@@ -247,7 +266,8 @@ export type CardChild =
   | FieldsElement
   | LinkElement
   | TableElement
-  | ChartElement;
+  | ChartElement
+  | TextInputElement;
 
 /** Union of all element types (including nested children) */
 type AnyCardElement =
@@ -444,6 +464,8 @@ export interface ButtonOptions {
   tooltip?: string;
   /** Optional payload value sent with action callback */
   value?: string;
+  /** User IDs that can see the button. Rendered by Slack only; other adapters show the button to everyone. Hides the button but does not restrict who can trigger its action */
+  visibleTo?: string[];
 }
 
 /**
@@ -466,6 +488,7 @@ export function Button(options: ButtonOptions): ButtonElement {
     actionType: options.actionType,
     callbackUrl: options.callbackUrl,
     tooltip: options.tooltip,
+    visibleTo: options.visibleTo,
   };
 }
 
@@ -481,6 +504,8 @@ export interface LinkButtonOptions {
   tooltip?: string;
   /** URL to open when clicked */
   url: string;
+  /** User IDs that can see the button. Rendered by Slack only; other adapters show the button to everyone. Hides the button but does not restrict who can trigger its action */
+  visibleTo?: string[];
 }
 
 /**
@@ -500,6 +525,7 @@ export function LinkButton(options: LinkButtonOptions): LinkButtonElement {
     label: options.label,
     style: options.style,
     tooltip: options.tooltip,
+    visibleTo: options.visibleTo,
   };
 }
 
@@ -543,12 +569,20 @@ export interface TableOptions {
   align?: TableAlignment[];
   /** Accessible table caption (used by platforms with native table support) */
   caption?: string;
+  /** Draw grid lines between cells (default true). Rendered by Teams only; other adapters ignore it */
+  gridLines?: boolean;
+  /** Style of the grid lines between cells. Rendered by Teams only; other adapters ignore it */
+  gridStyle?: TableGridStyle;
   /** Column header labels */
   headers: string[];
   /** Rows per page on platforms that paginate tables (Slack: 1-100, default 5) */
   pageSize?: number;
   /** Data rows */
   rows: string[][];
+  /** Vertical alignment of cell content. Rendered by Teams only; other adapters ignore it */
+  verticalAlign?: TableVerticalAlignment;
+  /** Relative column widths, one positive integer weight per column (default 1 each). Rendered by Teams only; other adapters ignore it */
+  widths?: number[];
 }
 
 /**
@@ -564,6 +598,19 @@ export interface TableOptions {
  *   ],
  * })
  * ```
+ *
+ * On Teams the table renders as a native Adaptive Card table; `widths`,
+ * `verticalAlign`, `gridLines` and `gridStyle` tune that rendering and are
+ * ignored elsewhere:
+ *
+ * ```ts
+ * Table({
+ *   headers: ["Service", "Status"],
+ *   rows: [["api", "ok"]],
+ *   widths: [3, 1],
+ *   gridStyle: "emphasis",
+ * })
+ * ```
  */
 export function Table(options: TableOptions): TableElement {
   return {
@@ -573,6 +620,10 @@ export function Table(options: TableOptions): TableElement {
     align: options.align,
     caption: options.caption,
     pageSize: options.pageSize,
+    widths: options.widths,
+    verticalAlign: options.verticalAlign,
+    gridLines: options.gridLines,
+    gridStyle: options.gridStyle,
   };
 }
 
@@ -693,6 +744,7 @@ const componentMap = new Map<unknown, string>([
   [Fields, "Fields"],
   [Table, "Table"],
   [Chart, "Chart"],
+  [TextInput, "TextInput"],
 ]);
 
 /**
@@ -816,6 +868,7 @@ export function fromReactElement(element: unknown): AnyCardElement | null {
         actionType: props.actionType as "action" | "modal" | undefined,
         disabled: props.disabled as boolean | undefined,
         tooltip: props.tooltip as string | undefined,
+        visibleTo: props.visibleTo as string[] | undefined,
       });
     }
 
@@ -827,6 +880,7 @@ export function fromReactElement(element: unknown): AnyCardElement | null {
         label: (props.label as string | undefined) ?? label,
         style: props.style as ButtonStyle | undefined,
         tooltip: props.tooltip as string | undefined,
+        visibleTo: props.visibleTo as string[] | undefined,
       });
     }
 
@@ -850,19 +904,18 @@ export function fromReactElement(element: unknown): AnyCardElement | null {
       );
 
     case "Table":
-      return Table({
-        headers: props.headers as string[],
-        rows: props.rows as string[][],
-        align: props.align as TableAlignment[] | undefined,
-        caption: props.caption as string | undefined,
-        pageSize: props.pageSize as number | undefined,
-      });
+      // Table() copies each option by name, so extra React props never leak.
+      return Table(props as unknown as TableOptions);
 
     case "Chart":
       return Chart({
         title: props.title as string,
         chart: props.chart as ChartDefinition,
       });
+
+    case "TextInput":
+      // TextInput() copies each option by name, same as Table above.
+      return TextInput(props as unknown as TextInputOptions);
 
     default:
       return null;
@@ -959,6 +1012,9 @@ export function cardChildToFallbackText(child: CardChild): string | null {
       return tableElementToAscii(child.headers, child.rows);
     case "chart":
       return chartElementToFallbackText(child);
+    case "text_input":
+      // An empty box carries no text of its own.
+      return child.label;
     case "section":
       return child.children
         .map((c) => cardChildToFallbackText(c))

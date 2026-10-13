@@ -22,6 +22,7 @@ import type {
   Message,
   StateAdapter,
 } from "chat";
+import { Chat } from "chat";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   SlackAdapterConfig,
@@ -37,6 +38,7 @@ import {
 import { incomingMessage } from "./test-fixtures";
 
 const FILE_ID_PATTERN = /^file-/;
+const ANY_TEXT_PATTERN = /./;
 
 // Captures guarded file downloads at the transport seam; the resolved
 // per-hop headers show which token (if any) each hop would send.
@@ -734,6 +736,7 @@ describe("handleWebhook - interactive payloads", () => {
   const secret = "test-signing-secret";
   const adapter = createSlackAdapter({
     botToken: "xoxb-test-token",
+    botUserId: "U_BOT",
     signingSecret: secret,
     logger: mockLogger,
   });
@@ -839,6 +842,7 @@ describe("handleWebhook - interactive payloads", () => {
 
     const adapter = createSlackAdapter({
       botToken: "xoxb-test-token",
+      botUserId: "U_BOT",
       signingSecret: secret,
       logger: mockLogger,
     });
@@ -1040,6 +1044,7 @@ describe("handleWebhook - interactive payloads", () => {
       const chatInstance = createMockChatInstance({ state });
       const timeoutAdapter = createSlackAdapter({
         botToken: "xoxb-test-token",
+        botUserId: "U_BOT",
         logger: mockLogger,
         webhookVerifier: () => true,
       });
@@ -1153,6 +1158,116 @@ describe("parseMessage", () => {
     botUserId: "U_BOT",
   });
 
+  it.each([
+    [
+      "cost is 2 * 3 seats and 4 * 5 licenses",
+      "cost is 2 * 3 seats and 4 * 5 licenses",
+    ],
+    ["run `rm -rf *` then 5 * 3", "run rm -rf * then 5 * 3"],
+    ["mail <mailto:a*b*c@example.com|email>", "mail email"],
+    ["call <tel:+15551234567|555-123-4567>", "call 555-123-4567"],
+    ["mail <mailto:user@example.com>", "mail user@example.com"],
+  ])("preserves incoming mrkdwn through both parsing paths: %s", async (text, expected) => {
+    const event: SlackEvent = {
+      type: "message",
+      user: "U123",
+      username: "alice",
+      channel: "C456",
+      text,
+      ts: "1234567890.123456",
+    };
+    const internals = adapter as unknown as {
+      parseSlackMessage(
+        value: SlackEvent,
+        threadId: string
+      ): Promise<Message<unknown>>;
+    };
+    for (const message of [
+      adapter.parseMessage(event),
+      await internals.parseSlackMessage(event, "slack:C456:1234567890.123456"),
+    ]) {
+      expect(message.text).toBe(expected);
+      expect(message.threadId).toBe("slack:C456:1234567890.123456");
+      expect(message.isMention).toBe(false);
+      if (text.startsWith("mail ")) {
+        expect(message.formatted.children[0]).toMatchObject({
+          type: "paragraph",
+          children: [
+            { type: "text", value: "mail " },
+            {
+              type: "link",
+              url: text.includes("a*b*c")
+                ? "mailto:a*b*c@example.com"
+                : "mailto:user@example.com",
+            },
+          ],
+        });
+      }
+    }
+  });
+
+  it("classifies the bot's mention without a user lookup", () => {
+    const section = (element: Record<string, unknown>) => [
+      {
+        type: "rich_text",
+        elements: [{ type: "rich_text_section", elements: [element] }],
+      },
+    ];
+    const base = {
+      type: "app_mention",
+      user: "U123",
+      channel: "C456",
+      text: "<@U_BOT> hi",
+      ts: "1234567890.123456",
+    };
+
+    const mention = adapter.parseMessage({
+      ...base,
+      blocks: section({ type: "user", user_id: "U_BOT" }),
+    });
+    const code = adapter.parseMessage({
+      ...base,
+      blocks: section({
+        type: "text",
+        text: "<@U_BOT> hi",
+        style: { code: true },
+      }),
+    });
+
+    expect(mention.isMention).toBe(true);
+    expect(code.isMention).toBe(false);
+  });
+
+  it("matches a structured user element regardless of bot id case", () => {
+    const lowercase = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: "test-secret",
+      logger: mockLogger,
+      botUserId: "u_bot",
+    });
+
+    const message = lowercase.parseMessage({
+      type: "message",
+      user: "U123",
+      channel: "C456",
+      text: "<@U_BOT> hi",
+      ts: "1234567890.123456",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [{ type: "user", user_id: "U_BOT" }],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(true);
+  });
+
   it("parses a basic message event", () => {
     const event = {
       type: "message",
@@ -1169,6 +1284,89 @@ describe("parseMessage", () => {
     expect(message.author.userId).toBe("U123");
     expect(message.author.isBot).toBe(false);
     expect(message.author.isMe).toBe(false);
+  });
+
+  it("converts special mentions to readable text", () => {
+    const message = adapter.parseMessage({
+      type: "message",
+      user: "U123",
+      channel: "C456",
+      text: "<!here> and <!subteam^S0123456789|@devs>",
+      ts: "1234567890.123456",
+    });
+
+    expect(message.text).toBe("@here and @devs");
+    expect(message.formatted.children.map((node) => node.type)).toEqual([
+      "paragraph",
+    ]);
+  });
+
+  it("preserves special mention tokens in an inbound inline code span", () => {
+    const text = "<!here> <!channel> <!everyone> <!subteam^S123>";
+    const message = adapter.parseMessage({
+      type: "message",
+      user: "U123",
+      channel: "D456",
+      channel_type: "im",
+      text: `review code \`${text}\``,
+      ts: "1234567890.123456",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "text", text: "review code " },
+                { type: "text", text, style: { code: true } },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.text).toBe(`review code ${text}`);
+    expect(message.formatted.children).toEqual([
+      expect.objectContaining({
+        type: "paragraph",
+        children: [
+          expect.objectContaining({ type: "text", value: "review code " }),
+          expect.objectContaining({ type: "inlineCode", value: text }),
+        ],
+      }),
+    ]);
+    expect(message.isMention).toBe(false);
+  });
+
+  it("preserves special mention tokens in an inbound code block", () => {
+    const text = "review fence <!here> <!channel> <!everyone>";
+    const message = adapter.parseMessage({
+      type: "message",
+      user: "U123",
+      channel: "D456",
+      channel_type: "im",
+      text: `\`\`\`${text}\`\`\``,
+      ts: "1234567890.123456",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_preformatted",
+              elements: [{ type: "text", text }],
+              border: 0,
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.text).toBe(text);
+    expect(message.formatted.children).toEqual([
+      expect.objectContaining({ type: "code", value: text }),
+    ]);
+    expect(message.isMention).toBe(false);
   });
 
   it("parses a bot message", () => {
@@ -1562,7 +1760,7 @@ describe("parseMessage", () => {
     });
 
     // Cell tokens are rendered by the same mrkdwn converter as body text
-    expect(message.text).toBe("#C789 <!subteam^S789> July 11 #ff0000");
+    expect(message.text).toBe("#C789 @S789 July 11 #ff0000");
   });
 
   it("formats date cells from the timestamp when no fallback is present", () => {
@@ -4090,7 +4288,7 @@ describe("DM message handling", () => {
     );
   });
 
-  it("DM messages do NOT have isMention set (routed via onDirectMessage)", async () => {
+  it("DM messages without a bot mention report isMention false", async () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     // Capture the factory function to invoke it
@@ -4131,7 +4329,9 @@ describe("DM message handling", () => {
     const factory = (chatInstance.processMessage as ReturnType<typeof vi.fn>)
       .mock.calls[0][2];
     const message = await factory();
-    expect(message.isMention).toBeUndefined();
+    // The adapter inspected the content and found no bot mention, so the flag
+    // is a definitive false rather than undetermined.
+    expect(message.isMention).toBe(false);
   });
 
   it("USLACK system notifications in DMs are dispatched with isSystem set", async () => {
@@ -4145,6 +4345,14 @@ describe("DM message handling", () => {
       botUserId: "U_BOT",
     });
     await adapter.initialize(chatInstance);
+
+    mockClientMethod(
+      adapter,
+      "conversations.info",
+      vi
+        .fn()
+        .mockResolvedValue({ ok: true, channel: { name: "archived-channel" } })
+    );
 
     mockClientMethod(
       adapter,
@@ -4181,7 +4389,7 @@ describe("DM message handling", () => {
     });
   });
 
-  it("channel messages do NOT have isMention auto-set", async () => {
+  it("channel messages without a bot mention report isMention false", async () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     chatInstance.processMessage = vi.fn();
@@ -4219,7 +4427,7 @@ describe("DM message handling", () => {
     const factory = (chatInstance.processMessage as ReturnType<typeof vi.fn>)
       .mock.calls[0][2];
     const message = await factory();
-    expect(message.isMention).toBeUndefined();
+    expect(message.isMention).toBe(false);
   });
 });
 
@@ -6524,6 +6732,229 @@ describe("openDM", () => {
 describe("fetchMessages", () => {
   const secret = "test-signing-secret";
 
+  it.each([
+    { count: 425, pageSize: 200 },
+    { count: 1205, pageSize: 200 },
+    { count: 425, pageSize: 15 },
+  ])("fetches the newest replies in a $count-message thread with $pageSize-message API pages", async ({
+    count,
+    pageSize,
+  }) => {
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      logger: mockLogger,
+      botUserId: "U_BOT",
+    });
+    const history = Array.from({ length: count }, (_, index) => ({
+      type: "message",
+      user: "U1",
+      text: `message ${index}`,
+      ts: `${1000 + index}.000000`,
+      channel: "C123",
+    }));
+    // Slack replies are oldest-first, including when `latest` is supplied.
+    const mockReplies = vi.fn(
+      async (options: { latest?: string; cursor?: string; limit: number }) => {
+        const eligible = history.filter(
+          (message) => !options.latest || message.ts < options.latest
+        );
+        const offset = Number(options.cursor ?? 0);
+        const end = offset + Math.min(options.limit, pageSize);
+        return {
+          ok: true,
+          messages: eligible.slice(offset, end),
+          has_more: end < eligible.length,
+          response_metadata: {
+            next_cursor: end < eligible.length ? String(end) : "",
+          },
+        };
+      }
+    );
+    mockClientMethod(adapter, "conversations.replies", mockReplies);
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({ ok: true, user: { name: "user1" } })
+    );
+    await adapter.initialize(
+      createMockChatInstance({ state: createMockState() })
+    );
+
+    const newest = await adapter.fetchMessages("slack:C123:1000.000000", {
+      limit: 50,
+    });
+    expect(newest.messages.map((message) => message.id)).toEqual(
+      history.slice(-50).map((message) => message.ts)
+    );
+    expect(newest.nextCursor).toBe(history[count - 50].ts);
+    expect(mockReplies).toHaveBeenCalledTimes(Math.ceil(count / pageSize));
+    expect(mockReplies).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cursor: String(pageSize),
+        latest: undefined,
+        limit: 1000,
+      })
+    );
+
+    mockReplies.mockClear();
+    const older = await adapter.fetchMessages("slack:C123:1000.000000", {
+      limit: 50,
+      cursor: newest.nextCursor,
+    });
+    expect(older.messages.map((message) => message.id)).toEqual(
+      history.slice(-100, -50).map((message) => message.ts)
+    );
+    expect(older.nextCursor).toBe(history[count - 100].ts);
+    expect(mockReplies).toHaveBeenCalledTimes(
+      Math.ceil((count - 50) / pageSize)
+    );
+
+    const oldest = await adapter.fetchMessages("slack:C123:1000.000000", {
+      limit: 50,
+      cursor: history[25].ts,
+    });
+    expect(oldest.messages.map((message) => message.id)).toEqual(
+      history.slice(0, 25).map((message) => message.ts)
+    );
+    expect(oldest.nextCursor).toBeUndefined();
+  });
+
+  it.each([
+    3, 5,
+  ])("keeps repeated thread parents unique and ordered with limit %i", async (limit) => {
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      logger: mockLogger,
+      botUserId: "U_BOT",
+    });
+    const history = Array.from({ length: 4 }, (_, index) => ({
+      type: "message",
+      user: "U1",
+      text: `message ${index}`,
+      ts: `${1000 + index}.000000`,
+    }));
+    const parent = history[0];
+    mockClientMethod(
+      adapter,
+      "conversations.replies",
+      vi.fn(async (options: { latest?: string; cursor?: string }) => {
+        const replies = history
+          .slice(1)
+          .filter((message) => !options.latest || message.ts < options.latest);
+        const offset = Number(options.cursor ?? 0);
+        const end = offset + 2;
+        return {
+          ok: true,
+          messages: [parent, ...replies.slice(offset, end)],
+          response_metadata: {
+            next_cursor: end < replies.length ? String(end) : "",
+          },
+        };
+      })
+    );
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({ ok: true, user: { name: "user1" } })
+    );
+    await adapter.initialize(
+      createMockChatInstance({ state: createMockState() })
+    );
+
+    const newest = await adapter.fetchMessages("slack:C123:1000.000000", {
+      limit,
+    });
+    expect(newest.messages.map((message) => message.id)).toEqual(
+      history.slice(-limit).map((message) => message.ts)
+    );
+    expect(newest.nextCursor).toBe(limit === 3 ? history[1].ts : undefined);
+
+    const oldest = await adapter.fetchMessages("slack:C123:1000.000000", {
+      limit,
+      cursor: history[1].ts,
+    });
+    expect(oldest.messages.map((message) => message.id)).toEqual([parent.ts]);
+    expect(oldest.nextCursor).toBeUndefined();
+
+    const exhausted = await adapter.fetchMessages("slack:C123:1000.000000", {
+      limit,
+      cursor: parent.ts,
+    });
+    expect(exhausted.messages).toEqual([]);
+    expect(exhausted.nextCursor).toBeUndefined();
+  });
+
+  it("continues through an empty Slack page with a next cursor", async () => {
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      logger: mockLogger,
+      botUserId: "U_BOT",
+    });
+    const mockReplies = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        messages: [],
+        response_metadata: { next_cursor: "next-page" },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        messages: [
+          { type: "message", user: "U1", text: "newest", ts: "1000.000000" },
+        ],
+        response_metadata: { next_cursor: "" },
+      });
+    mockClientMethod(adapter, "conversations.replies", mockReplies);
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({ ok: true, user: { name: "user1" } })
+    );
+    await adapter.initialize(
+      createMockChatInstance({ state: createMockState() })
+    );
+
+    const result = await adapter.fetchMessages("slack:C123:1000.000000");
+    expect(result.messages.map((message) => message.id)).toEqual([
+      "1000.000000",
+    ]);
+    expect(result.nextCursor).toBeUndefined();
+    expect(mockReplies).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ cursor: "next-page" })
+    );
+  });
+
+  it("rejects a failed later page instead of returning stale history", async () => {
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      logger: mockLogger,
+      botUserId: "U_BOT",
+    });
+    mockClientMethod(
+      adapter,
+      "conversations.replies",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          messages: [
+            { type: "message", user: "U1", text: "old", ts: "1000.000000" },
+          ],
+          response_metadata: { next_cursor: "next-page" },
+        })
+        .mockRejectedValueOnce(new Error("history unavailable"))
+    );
+
+    await expect(
+      adapter.fetchMessages("slack:C123:1000.000000")
+    ).rejects.toThrow("history unavailable");
+  });
+
   it("fetches messages in forward direction using cursor pagination", async () => {
     const adapter = createSlackAdapter({
       botToken: "xoxb-test-token",
@@ -7292,6 +7723,45 @@ describe("resolveInlineMentions", () => {
     resolveInlineMentions(text: string): Promise<string>;
   }
 
+  /** Round-trip an event through the webhook and return the parsed message. */
+  async function parseIncoming(event: Record<string, unknown>) {
+    const state = createMockState();
+    const chatInstance = createMockChatInstance({ state });
+    chatInstance.processMessage = vi.fn();
+
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      logger: mockLogger,
+      botUserId: "U_BOT",
+    });
+
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockImplementation(async ({ user }: { user: string }) => ({
+        ok: true,
+        user: {
+          name: user === "U_BOT" ? "bot" : "user",
+          profile: { display_name: user === "U_BOT" ? "Test Bot" : "User" },
+        },
+      }))
+    );
+
+    await adapter.initialize(chatInstance);
+
+    const body = JSON.stringify({
+      type: "event_callback",
+      team_id: "T123",
+      event,
+    });
+    await adapter.handleWebhook(createWebhookRequest(body, secret));
+
+    const factory = (chatInstance.processMessage as ReturnType<typeof vi.fn>)
+      .mock.calls[0][2];
+    return factory();
+  }
+
   it("resolves user mentions in incoming messages via webhook", async () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
@@ -7464,6 +7934,487 @@ describe("resolveInlineMentions", () => {
     const message = await factory();
 
     expect(message.text).toBe("@Test Bot");
+    expect(message.isMention).toBe(true);
+  });
+
+  it("does not flag a bot id that only appears in inline code", async () => {
+    const message = await parseIncoming({
+      type: "app_mention",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "the app imports `<@U_BOT>/passport`",
+      ts: "1234567890.888888",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "text", text: "the app imports " },
+                {
+                  type: "text",
+                  text: "<@U_BOT>/passport",
+                  style: { code: true },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("does not flag a code-styled user element", async () => {
+    // Slack stores a bot reference composed inside inline code as a `user`
+    // element carrying `style.code` (see sample-messages.md).
+    const message = await parseIncoming({
+      type: "app_mention",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "the app imports `<@U_BOT>/passport` and A &amp; B",
+      ts: "1234567890.888889",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "text", text: "the app imports " },
+                { type: "user", user_id: "U_BOT", style: { code: true } },
+                { type: "text", text: "/passport", style: { code: true } },
+                { type: "text", text: " and A & B" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("does not flag a bot id inside a preformatted block", async () => {
+    const message = await parseIncoming({
+      type: "app_mention",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "```\n<@U_BOT> is the bot\n```",
+      ts: "1234567890.999999",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_preformatted",
+              elements: [{ type: "text", text: "<@U_BOT> is the bot" }],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("flags a real mention when the same message also shows code", async () => {
+    const message = await parseIncoming({
+      type: "app_mention",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "<@U_BOT> run `<@U_BOT>/passport`",
+      ts: "1234567890.101010",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "user", user_id: "U_BOT" },
+                { type: "text", text: " run " },
+                {
+                  type: "text",
+                  text: "<@U_BOT>/passport",
+                  style: { code: true },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(true);
+  });
+
+  it("does not flag a bot id inside a code span when no blocks are present", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "run `<@U_BOT>` to invoke the bot",
+      ts: "1234567890.121212",
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("does not flag a bot id inside a fenced block when no blocks are present", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "```\n<@U_BOT>\n```",
+      ts: "1234567890.131313",
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("does not flag a literal bot name inside structured code", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "the docs say `@Example Bot`",
+      ts: "1234567890.141414",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "text", text: "the docs say " },
+                { type: "text", text: "@Example Bot", style: { code: true } },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("does not flag an escaped bot id", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "the raw markup is &lt;@U_BOT&gt;",
+      ts: "1234567890.151515",
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("does not flag a bot id inside a code span in an attachment", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "",
+      ts: "1234567890.161616",
+      attachments: [{ mrkdwn_in: ["text"], text: "example: `<@U_BOT>`" }],
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("flags a bot mention in attachment mrkdwn", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "",
+      ts: "1234567890.171717",
+      attachments: [{ mrkdwn_in: ["text"], text: "hey <@U_BOT> take a look" }],
+    });
+
+    expect(message.isMention).toBe(true);
+  });
+
+  it("does not let unmarked fallback text override structured code", async () => {
+    const message = await parseIncoming({
+      type: "app_mention",
+      user: "U_SENDER",
+      channel: "C456",
+      // Slack's flattened fallback drops the code formatting, so the token
+      // looks like a mention even though the blocks say it is code.
+      text: "the app imports <@U_BOT>/passport",
+      ts: "1234567890.181818",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "text", text: "the app imports " },
+                {
+                  type: "text",
+                  text: "<@U_BOT>/passport",
+                  style: { code: true },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("does not flag a bot id inside a raw_text table cell", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      // Slack's flattened fallback repeats the cell text, which is not a
+      // mention because a `raw_text` cell renders literally.
+      text: "Import <@U_BOT>/passport",
+      ts: "1234567890.191919",
+      blocks: [
+        {
+          type: "table",
+          rows: [
+            [
+              { type: "raw_text", text: "Import" },
+              { type: "raw_text", text: "<@U_BOT>/passport" },
+            ],
+          ],
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(false);
+    // The cell renders the way it is classified: as literal text.
+    expect(message.text).toContain("Import\t<@U_BOT>/passport");
+  });
+
+  it("does not flag a mention token in a rich-text text element", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "the app imports <@U_BOT>/passport",
+      ts: "1234567890.202021",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "text", text: "the app imports " },
+                { type: "text", text: "<@U_BOT>/passport" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("does not flag a mention token in a link label", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "<https://example.com|<@U_BOT>>",
+      ts: "1234567890.202022",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                {
+                  type: "link",
+                  url: "https://example.com",
+                  text: "<@U_BOT>",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("flags a bot mention in a mrkdwn section block", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      // Only the section block carries the mention, so the fallback text
+      // cannot be what satisfies this test.
+      text: "",
+      ts: "1234567890.202023",
+      blocks: [
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: "hey <@U_BOT> take a look" },
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(true);
+  });
+
+  it("does not flag a bot id in a plain_text section block", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "hey <@U_BOT> take a look",
+      ts: "1234567890.202024",
+      blocks: [
+        {
+          type: "section",
+          text: { type: "plain_text", text: "hey <@U_BOT> take a look" },
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("does not read attachment fallback when the attachment has blocks", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "",
+      ts: "1234567890.202025",
+      attachments: [
+        {
+          fallback: "<@U_BOT> is the bot",
+          blocks: [
+            {
+              type: "rich_text",
+              elements: [
+                {
+                  type: "rich_text_preformatted",
+                  elements: [{ type: "text", text: "<@U_BOT>" }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("does not flag the bot's display name inside a text-only code span", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "the docs say `@Test Bot`",
+      ts: "1234567890.202020",
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("reports false for an ordinary message that never refers to the bot", async () => {
+    const message = await parseIncoming({
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "hey <@U_OTHER> can you look?",
+      ts: "1234567890.202022",
+    });
+
+    expect(message.isMention).toBe(false);
+  });
+
+  it("trusts app_mention when the content never shows the known bot id", async () => {
+    // Enterprise Grid emits the bot's W… id in user elements while auth.test
+    // reported the U… id. Slack saw a mention, and no literal token explains
+    // the event, so the event stands.
+    const message = await parseIncoming({
+      type: "app_mention",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "<@W_BOT_GRID> help me",
+      ts: "1234567890.202023",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "user", user_id: "W_BOT_GRID" },
+                { type: "text", text: " help me" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(message.isMention).toBe(true);
+  });
+
+  it("trusts app_mention when the bot id is unknown", async () => {
+    const state = createMockState();
+    const chatInstance = createMockChatInstance({ state });
+    chatInstance.processMessage = vi.fn();
+
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      logger: mockLogger,
+    });
+    mockClientMethod(
+      adapter,
+      "auth.test",
+      vi.fn().mockResolvedValue({ ok: true })
+    );
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        user: { name: "bot", profile: { display_name: "Test Bot" } },
+      })
+    );
+    await adapter.initialize(chatInstance);
+
+    const body = JSON.stringify({
+      type: "event_callback",
+      team_id: "T123",
+      event: {
+        type: "app_mention",
+        user: "U_SENDER",
+        channel: "C456",
+        text: "<@U_BOT> help me",
+        ts: "1234567890.222222",
+      },
+    });
+    await adapter.handleWebhook(createWebhookRequest(body, secret));
+
+    const factory = (chatInstance.processMessage as ReturnType<typeof vi.fn>)
+      .mock.calls[0][2];
+    const message = await factory();
+
+    expect(adapter.botUserId).toBeUndefined();
     expect(message.isMention).toBe(true);
   });
 
@@ -7746,6 +8697,273 @@ describe("resolveInlineMentions", () => {
 
     // Should fall back to the channel ID
     expect(message.text).toContain("#CUNKNOWN");
+  });
+});
+
+// ============================================================================
+// Mention routing Tests
+// ============================================================================
+
+describe("mention routing", () => {
+  const secret = "test-signing-secret";
+
+  async function createRoutedBot(options: { botUserId?: string | null } = {}) {
+    const botUserId =
+      options.botUserId === undefined ? "U_BOT" : options.botUserId;
+    const state = createMockState();
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      logger: mockLogger,
+      userName: "Example Bot",
+      ...(botUserId ? { botUserId } : {}),
+    });
+    mockClientMethod(
+      adapter,
+      "auth.test",
+      vi
+        .fn()
+        .mockResolvedValue(
+          botUserId
+            ? { ok: true, user_id: botUserId, bot_id: "B_BOT" }
+            : { ok: true }
+        )
+    );
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        user: { name: "bot", profile: { display_name: "Example Bot" } },
+      })
+    );
+
+    const bot = new Chat({
+      userName: "Example Bot",
+      adapters: { slack: adapter },
+      state,
+      logger: mockLogger,
+    });
+    await bot.initialize();
+    return { adapter, bot };
+  }
+
+  /** Deliver a webhook and wait for the Chat routing task to finish. */
+  async function deliverWebhook(
+    adapter: SlackAdapter,
+    event: Record<string, unknown>
+  ) {
+    const pending: Promise<unknown>[] = [];
+    await adapter.handleWebhook(
+      createWebhookRequest(
+        JSON.stringify({ type: "event_callback", team_id: "T123", event }),
+        secret
+      ),
+      { waitUntil: (task) => pending.push(task) }
+    );
+    await Promise.all(pending);
+  }
+
+  it("routes a code-only reference to message handlers, not mention handlers", async () => {
+    const { adapter, bot } = await createRoutedBot();
+    const mentionHandler = vi.fn();
+    const messageHandler = vi.fn();
+    bot.onNewMention(mentionHandler);
+    bot.onNewMessage(ANY_TEXT_PATTERN, messageHandler);
+
+    // The bot's display name is in the flattened text, so the SDK's text
+    // detection would otherwise route this message to the mention handler.
+    await deliverWebhook(adapter, {
+      type: "app_mention",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "the app imports `<@U_BOT>/passport`",
+      ts: "1234567890.202020",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "text", text: "the app imports " },
+                {
+                  type: "text",
+                  text: "<@U_BOT>/passport",
+                  style: { code: true },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(mentionHandler).not.toHaveBeenCalled();
+    expect(messageHandler).toHaveBeenCalled();
+  });
+
+  it("routes a real mention to mention handlers", async () => {
+    const { adapter, bot } = await createRoutedBot();
+    const mentionHandler = vi.fn();
+    bot.onNewMention(mentionHandler);
+
+    await deliverWebhook(adapter, {
+      type: "app_mention",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "<@U_BOT> help me",
+      ts: "1234567890.212121",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [{ type: "user", user_id: "U_BOT" }],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(mentionHandler).toHaveBeenCalled();
+  });
+
+  it("routes a code-only reference with misleading fallback text to message handlers", async () => {
+    const { adapter, bot } = await createRoutedBot();
+    const mentionHandler = vi.fn();
+    const messageHandler = vi.fn();
+    bot.onNewMention(mentionHandler);
+    bot.onNewMessage(ANY_TEXT_PATTERN, messageHandler);
+
+    // The fallback `text` has no backticks, so it looks like a real mention;
+    // only the code-styled block element reveals it is literal.
+    await deliverWebhook(adapter, {
+      type: "app_mention",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "the app imports <@U_BOT>/passport",
+      ts: "1234567890.222222",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "text", text: "the app imports " },
+                {
+                  type: "text",
+                  text: "<@U_BOT>/passport",
+                  style: { code: true },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(mentionHandler).not.toHaveBeenCalled();
+    expect(messageHandler).toHaveBeenCalled();
+  });
+
+  it("routes a raw_text table cell reference to message handlers", async () => {
+    const { adapter, bot } = await createRoutedBot();
+    const mentionHandler = vi.fn();
+    const messageHandler = vi.fn();
+    bot.onNewMention(mentionHandler);
+    bot.onNewMessage(ANY_TEXT_PATTERN, messageHandler);
+
+    await deliverWebhook(adapter, {
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "Import <@U_BOT>/passport",
+      ts: "1234567890.232323",
+      blocks: [
+        {
+          type: "table",
+          rows: [
+            [
+              { type: "raw_text", text: "Import" },
+              { type: "raw_text", text: "<@U_BOT>/passport" },
+            ],
+          ],
+        },
+      ],
+    });
+
+    expect(mentionHandler).not.toHaveBeenCalled();
+    expect(messageHandler).toHaveBeenCalled();
+  });
+
+  it("routes a text-only code reference to message handlers", async () => {
+    const { adapter, bot } = await createRoutedBot();
+    const mentionHandler = vi.fn();
+    const messageHandler = vi.fn();
+    bot.onNewMention(mentionHandler);
+    bot.onNewMessage(ANY_TEXT_PATTERN, messageHandler);
+
+    // No id markup at all: the configured name appears only inside a code span.
+    await deliverWebhook(adapter, {
+      type: "message",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "the docs say `@Example Bot`",
+      ts: "1234567890.242424",
+    });
+
+    expect(mentionHandler).not.toHaveBeenCalled();
+    expect(messageHandler).toHaveBeenCalled();
+  });
+
+  it("trusts app_mention when Slack reports an id the adapter does not know", async () => {
+    const { adapter, bot } = await createRoutedBot();
+    const mentionHandler = vi.fn();
+    bot.onNewMention(mentionHandler);
+
+    await deliverWebhook(adapter, {
+      type: "app_mention",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "<@W_BOT_GRID> help me",
+      ts: "1234567890.252524",
+      blocks: [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "user", user_id: "W_BOT_GRID" },
+                { type: "text", text: " help me" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(mentionHandler).toHaveBeenCalled();
+  });
+
+  it("trusts app_mention when the bot id is unresolved", async () => {
+    const { adapter, bot } = await createRoutedBot({ botUserId: null });
+    const mentionHandler = vi.fn();
+    bot.onNewMention(mentionHandler);
+
+    await deliverWebhook(adapter, {
+      type: "app_mention",
+      user: "U_SENDER",
+      channel: "C456",
+      text: "<@U_BOT> help me",
+      ts: "1234567890.252525",
+    });
+
+    expect(adapter.botUserId).toBeUndefined();
+    expect(mentionHandler).toHaveBeenCalled();
   });
 });
 
@@ -9577,6 +10795,15 @@ describe("reverse user lookup", () => {
     it("marks messages from USLACK as isSystem", async () => {
       const { adapter } = createAdapterWithState();
 
+      mockClientMethod(
+        adapter,
+        "conversations.info",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          channel: { name: "archived-channel" },
+        })
+      );
+
       const mockClient = (
         adapter as unknown as { _client: { users: { info: unknown } } }
       )._client;
@@ -9963,6 +11190,7 @@ describe("socket mode - initialize", () => {
 
     const state = createMockState();
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       mode: "socket",
       appToken: "xapp-test-token",
       botToken: "xoxb-test-token",
@@ -9994,6 +11222,7 @@ describe("socket mode - routeSocketEvent", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       mode: "socket",
       appToken: "xapp-test-token",
       botToken: "xoxb-test-token",
@@ -10036,7 +11265,13 @@ describe("socket mode - routeSocketEvent", () => {
   });
 
   it("dispatches slash_commands to processSlashCommand", async () => {
-    const { chatInstance, slackEventHandler } = await createSocketAdapter();
+    const { adapter, chatInstance, slackEventHandler } =
+      await createSocketAdapter();
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({ ok: true, user: { name: "testuser" } })
+    );
 
     await slackEventHandler({
       ack: vi.fn().mockResolvedValue(undefined),
@@ -10178,6 +11413,7 @@ describe("socket mode - disconnect", () => {
 
     const state = createMockState();
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       mode: "socket",
       appToken: "xapp-test-token",
       botToken: "xoxb-test-token",
@@ -10214,6 +11450,7 @@ describe("socket mode forwarding - handleWebhook", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: secret,
       appToken,
@@ -10310,6 +11547,7 @@ describe("socket mode forwarding - handleWebhook", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: secret,
       appToken,
@@ -10441,6 +11679,7 @@ describe("socket mode forwarding - handleWebhook", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: secret,
       appToken,
@@ -10480,6 +11719,7 @@ describe("socket mode forwarding - handleWebhook", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: secret,
       appToken,
@@ -10584,6 +11824,7 @@ describe("routeSocketEvent with options", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       mode: "socket",
       appToken: "xapp-test-token",
       botToken: "xoxb-test-token",
@@ -10606,8 +11847,13 @@ describe("routeSocketEvent with options", () => {
   }
 
   it("dispatches slash_commands with waitUntil wrapping", async () => {
-    const { chatInstance, slackEventHandler } =
+    const { adapter, chatInstance, slackEventHandler } =
       await createSocketAdapterWithOptions();
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({ ok: true, user: { name: "testuser" } })
+    );
 
     await slackEventHandler({
       ack: vi.fn().mockResolvedValue(undefined),
@@ -10629,12 +11875,18 @@ describe("routeSocketEvent with options", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: "test-secret",
       appToken: "xapp-test-token",
       logger: mockLogger,
     });
     await adapter.initialize(chatInstance);
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({ ok: true, user: { name: "testuser" } })
+    );
 
     const body = JSON.stringify({
       type: "socket_event",
@@ -10669,6 +11921,7 @@ describe("routeSocketEvent with options", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: "test-secret",
       appToken: "xapp-test-token",
@@ -11815,6 +13068,7 @@ describe("feedbackButtons", () => {
 
   it("routes feedback button clicks through onAction", async () => {
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: "test-signing-secret",
       logger: mockLogger,
@@ -11918,6 +13172,7 @@ describe("getUser", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: "test-secret",
       logger: mockLogger,
@@ -11957,6 +13212,7 @@ describe("getUser", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: "test-secret",
       logger: mockLogger,
@@ -11977,6 +13233,7 @@ describe("getUser", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: "test-secret",
       logger: mockLogger,
@@ -11997,6 +13254,7 @@ describe("getUser", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: "test-secret",
       logger: mockLogger,
@@ -12030,6 +13288,7 @@ describe("getUser", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: "test-secret",
       logger: mockLogger,
@@ -12065,6 +13324,7 @@ describe("getUser", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: "test-secret",
       logger: mockLogger,
@@ -12095,6 +13355,7 @@ describe("getUser", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: "test-secret",
       logger: mockLogger,
@@ -12127,11 +13388,17 @@ describe("link unfurl enrichment", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: secret,
       logger: mockLogger,
     });
     await adapter.initialize(chatInstance);
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({ ok: true, user: { name: "testuser" } })
+    );
 
     const body = JSON.stringify({
       type: "event_callback",
@@ -12197,11 +13464,17 @@ describe("link unfurl enrichment", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: secret,
       logger: mockLogger,
     });
     await adapter.initialize(chatInstance);
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({ ok: true, user: { name: "testuser" } })
+    );
 
     const body = JSON.stringify({
       type: "event_callback",
@@ -12241,11 +13514,17 @@ describe("link unfurl enrichment", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: secret,
       logger: mockLogger,
     });
     await adapter.initialize(chatInstance);
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({ ok: true, user: { name: "testuser" } })
+    );
 
     const body = JSON.stringify({
       type: "event_callback",
@@ -12287,11 +13566,17 @@ describe("link unfurl enrichment", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: secret,
       logger: mockLogger,
     });
     await adapter.initialize(chatInstance);
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({ ok: true, user: { name: "testuser" } })
+    );
 
     const overLong = `https://example.com/${"a".repeat(4000)}`;
     const body = JSON.stringify({
@@ -12323,11 +13608,17 @@ describe("link unfurl enrichment", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: secret,
       logger: mockLogger,
     });
     await adapter.initialize(chatInstance);
+    mockClientMethod(
+      adapter,
+      "users.info",
+      vi.fn().mockResolvedValue({ ok: true, user: { name: "testuser" } })
+    );
 
     const body = JSON.stringify({
       type: "event_callback",
@@ -12757,6 +14048,7 @@ describe("installation-scoped caches", () => {
   it("uses unscoped keys without a request context (single-workspace)", async () => {
     const state = createMockState();
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-single-token",
       signingSecret: "test-signing-secret",
       logger: mockLogger,
@@ -13113,6 +14405,7 @@ describe("event delivery deduplication", () => {
     const state = createMockState();
     const chatInstance = createMockChatInstance({ state });
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: secret,
       logger: mockLogger,
@@ -13223,6 +14516,7 @@ describe("W-prefixed enterprise user IDs", () => {
   async function createWAdapter() {
     const state = createMockState();
     const adapter = createSlackAdapter({
+      botUserId: "U_BOT",
       botToken: "xoxb-test-token",
       signingSecret: "test-signing-secret",
       logger: mockLogger,

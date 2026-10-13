@@ -1,4 +1,4 @@
-import { type AdapterSlug, isAdapterSlug } from "chat/adapters";
+import { type AdapterSlug, isAdapterSlug } from "@chat-adapter/catalog";
 import { AdapterSelectionError } from "../errors.js";
 
 /**
@@ -171,6 +171,9 @@ export const CLI_SCAFFOLD_SPEC = {
     ],
   },
   gchat: {
+    invocation: { kind: "zero-arg" },
+  },
+  gmail: {
     invocation: { kind: "zero-arg" },
   },
   github: {
@@ -346,6 +349,9 @@ export const CLI_SCAFFOLD_SPEC = {
     invocation: { kind: "zero-arg" },
   },
   twilio: {
+    invocation: { kind: "zero-arg" },
+  },
+  twitch: {
     invocation: { kind: "zero-arg" },
   },
   velt: {

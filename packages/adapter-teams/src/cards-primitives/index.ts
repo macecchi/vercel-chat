@@ -12,8 +12,11 @@ import type {
   TeamsRadioSelectElement,
   TeamsSectionElement,
   TeamsSelectElement,
+  TeamsTableAlignment,
   TeamsTableElement,
+  TeamsTableVerticalAlignment,
   TeamsTextElement,
+  TeamsTextInputElement,
 } from "./types";
 
 export * from "./input";
@@ -84,7 +87,9 @@ function convertChild(child: TeamsCardChild): ConvertedChild {
     case "link":
       return { actions: [], body: [convertLink(child)] };
     case "table":
-      return { actions: [], body: [convertTable(child)] };
+      return { actions: [], body: convertTable(child) };
+    case "text_input":
+      return { actions: [], body: [convertTextInput(child)] };
     default:
       return { actions: [], body: [] };
   }
@@ -103,6 +108,40 @@ function convertImage(element: TeamsImageElement): unknown {
     size: "Auto",
     type: "Image",
     url: element.url,
+  };
+}
+
+// Input IDs that would collide with a button's own `Action.Submit` data. Teams
+// merges the card's inputs into that data, so an input named `actionId` would
+// replace the clicked button's ID with whatever the user typed.
+const RESERVED_INPUT_IDS: ReadonlySet<string> = new Set([
+  "actionId",
+  "msteams",
+  "value",
+]);
+
+// Same mapping as `textInputToAdaptive` in the full adapter's cards.ts, so both
+// subpaths emit the same element. An input is required unless `optional` is
+// set, and Teams validates every input on the card before it lets an
+// Action.Submit through.
+function convertTextInput(input: TeamsTextInputElement): unknown {
+  if (RESERVED_INPUT_IDS.has(input.id)) {
+    throw new Error(
+      `A card TextInput can't use the ID "${input.id}", which is reserved for the button's own submit data`
+    );
+  }
+
+  return {
+    id: input.id,
+    isMultiline: input.multiline ?? false,
+    isRequired: !(input.optional ?? false),
+    label: convertTeamsEmojiPlaceholders(input.label),
+    ...(input.maxLength === undefined ? {} : { maxLength: input.maxLength }),
+    ...(input.placeholder === undefined
+      ? {}
+      : { placeholder: input.placeholder }),
+    ...(input.initialValue === undefined ? {} : { value: input.initialValue }),
+    type: "Input.Text",
   };
 }
 
@@ -210,28 +249,99 @@ function convertLink(link: TeamsLinkElement): unknown {
   return textBlock(`[${link.label}](${link.url})`);
 }
 
-function convertTable(table: TeamsTableElement): unknown {
-  return {
-    items: [
-      {
-        columns: table.headers.map((header) => ({
-          items: [textBlock(header, { weight: "Bolder" })],
-          type: "Column",
-          width: "stretch",
-        })),
-        type: "ColumnSet",
-      },
-      ...table.rows.map((row) => ({
-        columns: row.map((cell) => ({
-          items: [textBlock(cell)],
-          type: "Column",
-          width: "stretch",
-        })),
-        type: "ColumnSet",
-      })),
-    ],
-    type: "Container",
-  };
+const TABLE_HORIZONTAL_ALIGNMENT: Record<
+  TeamsTableAlignment,
+  "Center" | "Left" | "Right"
+> = {
+  center: "Center",
+  left: "Left",
+  right: "Right",
+};
+
+const TABLE_VERTICAL_ALIGNMENT: Record<
+  TeamsTableVerticalAlignment,
+  "Bottom" | "Center" | "Top"
+> = {
+  bottom: "Bottom",
+  center: "Center",
+  top: "Top",
+};
+
+// Adaptive Cards treats a column width as a relative weight only when it is a
+// positive integer; Teams desktop and mobile disagree on anything else, so an
+// invalid weight falls back to the default instead of reaching the wire.
+function columnWeight(width: number | undefined): number {
+  return width !== undefined && Number.isInteger(width) && width > 0
+    ? width
+    : 1;
+}
+
+// The widest row sets the column count, so a short row is padded with empty
+// cells instead of shifting the grid. Accumulated in a loop rather than
+// `Math.max(...rows.map(...))`, which spreads one argument per row and blows
+// the call-argument limit on a large table.
+function tableColumnCount(headers: string[], rows: string[][]): number {
+  let count = headers.length;
+  for (const row of rows) {
+    if (row.length > count) {
+      count = row.length;
+    }
+  }
+  return count;
+}
+
+// Returns an array so "no columns means nothing to draw" needs no null check at
+// the call site, matching what the empty ASCII fallback says.
+function convertTable(table: TeamsTableElement): unknown[] {
+  const columnCount = tableColumnCount(table.headers, table.rows);
+  if (columnCount === 0) {
+    return [];
+  }
+  const toRow = (cells: string[], options: Record<string, unknown> = {}) => ({
+    cells: Array.from({ length: columnCount }, (_, index) => ({
+      items: [textBlock(cells[index] ?? "", options)],
+      type: "TableCell",
+    })),
+    type: "TableRow",
+  });
+  const hasHeader = table.headers.length > 0;
+  const rows = table.rows.map((row) => toRow(row));
+  if (hasHeader) {
+    rows.unshift(toRow(table.headers, { weight: "Bolder" }));
+  }
+
+  return [
+    {
+      columns: Array.from({ length: columnCount }, (_, index) => {
+        const align = table.align?.[index];
+        return {
+          ...(align
+            ? {
+                horizontalCellContentAlignment:
+                  TABLE_HORIZONTAL_ALIGNMENT[align],
+              }
+            : {}),
+          width: columnWeight(table.widths?.[index]),
+        };
+      }),
+      // Plural on purpose — see the matching note in `cards.ts`. The prose
+      // property table on Microsoft's Table reference page says
+      // `firstRowAsHeader`, but the plural is what renderers read, and the
+      // property defaults to `true` when absent, so emitting the singular
+      // would give a headerless table a header row.
+      firstRowAsHeaders: hasHeader,
+      ...(table.gridStyle ? { gridStyle: table.gridStyle } : {}),
+      rows,
+      showGridLines: table.gridLines ?? true,
+      type: "Table",
+      ...(table.verticalAlign
+        ? {
+            verticalCellContentAlignment:
+              TABLE_VERTICAL_ALIGNMENT[table.verticalAlign],
+          }
+        : {}),
+    },
+  ];
 }
 
 function textBlock(
@@ -275,6 +385,9 @@ function cardChildToFallbackText(child: TeamsCardChild): string {
         child.headers.join(" | "),
         ...child.rows.map((row) => row.join(" | ")),
       ].join("\n");
+    case "text_input":
+      // An empty box carries nothing; its label is what the reader needs.
+      return child.label;
     default:
       return "";
   }
