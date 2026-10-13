@@ -8,7 +8,11 @@ import {
 import { Chat, Message } from "chat";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resetTwilioContentCacheForTests } from "./api/content";
-import { createTwilioAdapter, type TwilioThreadId } from "./index";
+import {
+  createTwilioAdapter,
+  TwilioAdapter,
+  type TwilioThreadId,
+} from "./index";
 
 describe("TwilioAdapter", () => {
   beforeEach(() => {
@@ -959,6 +963,100 @@ describe("sendTemplate", () => {
       })
     ).rejects.toThrow("contentSid is required");
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects a whitespace-only ContentSid before calling Twilio", async () => {
+    const fetch = mockFetch({ sid: "SM123" });
+    const adapter = createTwilioAdapter({
+      accountSid: "AC123",
+      authToken: "token",
+      fetch,
+    });
+
+    await expect(
+      adapter.sendTemplate("twilio:%2B15550000001:%2B15550000002", {
+        contentSid: "   ",
+      })
+    ).rejects.toThrow("contentSid is required");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects a ContentSid that does not start with HX", async () => {
+    const fetch = mockFetch({ sid: "SM123" });
+    const adapter = createTwilioAdapter({
+      accountSid: "AC123",
+      authToken: "token",
+      fetch,
+    });
+
+    await expect(
+      adapter.sendTemplate("twilio:%2B15550000001:%2B15550000002", {
+        contentSid: "SM123",
+      })
+    ).rejects.toThrow("Invalid contentSid");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an empty string", ""],
+    ["malformed JSON", "{1:'x'}"],
+    ["a JSON array", '["x"]'],
+    ["JSON null", "null"],
+  ])("rejects content variables given as %s", async (_label, value) => {
+    const fetch = mockFetch({ sid: "SM123" });
+    const adapter = createTwilioAdapter({
+      accountSid: "AC123",
+      authToken: "token",
+      fetch,
+    });
+
+    await expect(
+      adapter.sendTemplate("twilio:%2B15550000001:%2B15550000002", {
+        contentSid: "HX123",
+        contentVariables: value,
+      })
+    ).rejects.toThrow("contentVariables must be an object");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not route card sends through an overridden sendTemplate", async () => {
+    const fetch = mockRcsFetch({
+      messageResource: {
+        direction: "outbound-api",
+        messaging_service_sid: "MG123",
+        sid: "SM456",
+        to: "+15550000002",
+      },
+    });
+    class CustomTwilioAdapter extends TwilioAdapter {
+      override sendTemplate(): never {
+        throw new Error("sendTemplate should not be called");
+      }
+    }
+    const adapter = new CustomTwilioAdapter({
+      accountSid: "AC123",
+      authToken: "token",
+      fetch,
+    });
+
+    const result = await adapter.postMessage("twilio:MG123:%2B15550000002", {
+      card: {
+        children: [
+          {
+            children: [{ id: "yes", label: "Yes", type: "button" as const }],
+            type: "actions" as const,
+          },
+        ],
+        title: "Confirm?",
+        type: "card" as const,
+      },
+    });
+
+    expect(result.id).toBe("SM456");
+    const body = messageCalls(fetch)[0]?.[1]?.body as URLSearchParams;
+    expect(body.get("ContentSid")).toBe("HX123");
+    expect(body.get("MessagingServiceSid")).toBe("MG123");
+    expect(body.has("ContentVariables")).toBe(false);
   });
 });
 
