@@ -78,7 +78,7 @@ WhatsApp and RCS conversations can show a typing indicator via `thread.startTypi
 - WhatsApp: `{ channel: "WHATSAPP", messageId }` (inbound Message SID)
 - RCS: `{ channel: "RCS", from: "rcs:<agent_id>", to: "rcs:+E164", event: "START" }`
 
-Messaging Service (`MG…`) threads are treated as SMS unless `rcsSenderId` is set or the thread sender is already `rcs:`.
+On WhatsApp, Twilio also marks the referenced message as read. Phone-number threads are SMS and never send typing. Messaging Service (`MG…`) threads send RCS typing only when `rcsSenderId` is set and the thread has an inbound message; `rcs:` threads always do. If Twilio rejects the request, the adapter logs a warning instead of throwing. Set `messagingApiUrl` (or `apiUrl`) to point typing requests at a proxy or emulator.
 
 ## Media
 

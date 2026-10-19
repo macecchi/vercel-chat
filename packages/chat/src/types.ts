@@ -695,6 +695,8 @@ export type AgentSessionStatus =
 export interface TypingOptions {
   /** User who initiated the current turn, when known. */
   initiatorUserId?: string;
+  /** ID of the message that started the current turn, when known. */
+  messageId?: string;
 }
 
 /** Internal interface for Chat instance passed to adapters */

@@ -104,16 +104,16 @@ export interface ListTwilioMessagesOptions extends TwilioApiOptions {
   to?: string;
 }
 
-export interface SendTwilioTypingIndicatorOptions extends TwilioApiOptions {
-  channel?: "RCS" | "WHATSAPP";
-  event?: "START";
-  from?: string;
-  messageId?: string;
-  to?: string;
-}
+export type SendTwilioTypingIndicatorOptions = TwilioApiOptions & {
+  messagingApiUrl?: string;
+} & (
+    | { channel: "WHATSAPP"; messageId: string }
+    | { channel: "RCS"; event?: "START"; from: string; to: string }
+  );
 
 export interface CallTwilioApiOptions extends TwilioApiOptions {
   body?: TwilioFormFields | URLSearchParams;
+  json?: unknown;
   method?: "DELETE" | "GET" | "POST";
   path: string;
   search?: TwilioFormFields | URLSearchParams;
@@ -132,9 +132,6 @@ export class TwilioApiError extends Error {
 }
 
 function appendTwilioErrorDetail(message: string, body: unknown): string {
-  if (typeof body === "string" && body.trim()) {
-    return `${message}: ${body.trim()}`;
-  }
   if (!body || typeof body !== "object") {
     return message;
   }
@@ -186,15 +183,22 @@ export async function callTwilioApi(
   for (const [key, value] of formParams(requestOptions.search) ?? []) {
     url.searchParams.append(key, value);
   }
-  const body = formParams(requestOptions.body);
+  const body =
+    requestOptions.json === undefined
+      ? formParams(requestOptions.body)
+      : JSON.stringify(requestOptions.json);
+  let contentType: string | undefined;
+  if (requestOptions.json !== undefined) {
+    contentType = "application/json";
+  } else if (body) {
+    contentType = "application/x-www-form-urlencoded;charset=UTF-8";
+  }
   const request = requestOptions.fetch ?? fetch;
   const response = await request(url, {
     body,
     headers: {
       authorization: twilioAuthorization(accountSid, authToken),
-      ...(body
-        ? { "content-type": "application/x-www-form-urlencoded;charset=UTF-8" }
-        : {}),
+      ...(contentType ? { "content-type": contentType } : {}),
     },
     method: requestOptions.method ?? "POST",
   });
@@ -347,55 +351,35 @@ export async function fetchTwilioMedia(
 export async function sendTwilioTypingIndicator(
   options: SendTwilioTypingIndicatorOptions
 ): Promise<{ success?: boolean }> {
-  const body: Record<string, string> = {};
-  if (options.channel) {
-    body.channel = options.channel;
-  }
-  if (options.event) {
-    body.event = options.event;
-  }
-  if (options.from) {
-    body.from = options.from;
-  }
-  if (options.to) {
-    body.to = options.to;
-  }
-  if (options.messageId) {
-    body.messageId = options.messageId;
-  }
-  const accountSid = await resolveTwilioCredential(
-    options.credentials?.accountSid,
-    "TWILIO_ACCOUNT_SID"
-  );
-  const authToken = await resolveTwilioCredential(
-    options.credentials?.authToken,
-    "TWILIO_AUTH_TOKEN"
-  );
-  const url = new URL("/v3/Indicators/Typing.json", DEFAULT_MESSAGING_API_URL);
-  const request = options.fetch ?? fetch;
-  const response = await request(url, {
-    body: JSON.stringify(body),
-    headers: {
-      authorization: twilioAuthorization(accountSid, authToken),
-      "content-type": "application/json",
-    },
-    method: "POST",
+  const json =
+    options.channel === "WHATSAPP"
+      ? { channel: options.channel, messageId: options.messageId }
+      : {
+          channel: options.channel,
+          event: options.event ?? "START",
+          from: options.from,
+          to: options.to,
+        };
+  const response = await callTwilioApi("/v3/Indicators/Typing.json", {
+    ...options,
+    apiUrl:
+      options.messagingApiUrl ??
+      options.apiUrl ??
+      options.apiBaseUrl ??
+      DEFAULT_MESSAGING_API_URL,
+    json,
   });
-  const responseBody = await parseTwilioResponse(response);
-  if (!response.ok) {
-    throw new TwilioApiError(`Twilio API returned HTTP ${response.status}`, {
-      body: responseBody,
-      status: response.status,
-    });
-  }
-  const result = (responseBody ?? {}) as { success?: boolean };
-  if (result.success === false) {
+  const result = response.body ?? {};
+  if (
+    typeof result !== "object" ||
+    (result as { success?: unknown }).success === false
+  ) {
     throw new TwilioApiError("Twilio typing indicator failed", {
-      body: responseBody,
+      body: result,
       status: response.status,
     });
   }
-  return result;
+  return result as { success?: boolean };
 }
 
 export async function listTwilioMessages(

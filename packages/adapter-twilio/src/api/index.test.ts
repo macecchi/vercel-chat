@@ -266,6 +266,89 @@ describe("Twilio api helpers", () => {
     });
   });
 
+  it("sends typing indicators to messagingApiUrl, then apiUrl", async () => {
+    const request = mockFetch({ success: true });
+
+    await sendTwilioTypingIndicator({
+      apiUrl: "https://api.test",
+      channel: "WHATSAPP",
+      credentials: credentials(),
+      fetch: request,
+      messageId: "SM123",
+      messagingApiUrl: "https://messaging.test",
+    });
+    await sendTwilioTypingIndicator({
+      apiUrl: "https://api.test",
+      channel: "WHATSAPP",
+      credentials: credentials(),
+      fetch: request,
+      messageId: "SM123",
+    });
+
+    expect(String(request.mock.calls[0]?.[0])).toBe(
+      "https://messaging.test/v3/Indicators/Typing.json"
+    );
+    expect(String(request.mock.calls[1]?.[0])).toBe(
+      "https://api.test/v3/Indicators/Typing.json"
+    );
+  });
+
+  it("defaults the RCS typing event to START", async () => {
+    const request = mockFetch({ success: true });
+
+    await sendTwilioTypingIndicator({
+      channel: "RCS",
+      credentials: credentials(),
+      fetch: request,
+      from: "rcs:brand_agent",
+      to: "rcs:+15550000002",
+    });
+
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({
+      channel: "RCS",
+      event: "START",
+      from: "rcs:brand_agent",
+      to: "rcs:+15550000002",
+    });
+  });
+
+  it("rejects a typing indicator 2xx response that is not JSON", async () => {
+    const request = vi.fn(
+      async () => new Response("<html>ok</html>", { status: 200 })
+    );
+
+    await expect(
+      sendTwilioTypingIndicator({
+        channel: "WHATSAPP",
+        credentials: credentials(),
+        fetch: request,
+        messageId: "SM123",
+      })
+    ).rejects.toBeInstanceOf(TwilioApiError);
+  });
+
+  it("keeps non-JSON error bodies out of the error message", async () => {
+    const request = vi.fn(
+      async () =>
+        new Response("<html><body>Bad Gateway</body></html>", { status: 502 })
+    );
+
+    const error = await sendTwilioTypingIndicator({
+      channel: "WHATSAPP",
+      credentials: credentials(),
+      fetch: request,
+      messageId: "SM123",
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(TwilioApiError);
+    expect((error as TwilioApiError).message).toBe(
+      "Twilio API returned HTTP 502"
+    );
+    expect((error as TwilioApiError).body).toBe(
+      "<html><body>Bad Gateway</body></html>"
+    );
+  });
+
   it("includes Twilio error details on typing indicator HTTP failures", async () => {
     const request = mockFetch(
       {
@@ -278,6 +361,7 @@ describe("Twilio api helpers", () => {
 
     await expect(
       sendTwilioTypingIndicator({
+        channel: "WHATSAPP",
         credentials: credentials(),
         fetch: request,
         messageId: "SMoutbound",
@@ -292,6 +376,7 @@ describe("Twilio api helpers", () => {
 
     await expect(
       sendTwilioTypingIndicator({
+        channel: "WHATSAPP",
         credentials: credentials(),
         fetch: request,
         messageId: "SM123",
